@@ -2,7 +2,18 @@ package com.hq.retrocam
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.ContentValues
 import android.content.Intent
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.os.Environment
+import android.provider.MediaStore
+import android.widget.SeekBar
+import com.hq.retrocam.camera.ManualOptions
+import com.hq.retrocam.camera.Opt
+import com.hq.retrocam.camera.ProParam
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -72,6 +83,38 @@ class MainActivity : AppCompatActivity() {
     private var lastIsVideo = false
     private val styleViews = ArrayList<TextView>()
 
+    // Phase 2
+    private data class Ratio(val label: String, val r: Float)
+    private val photoRatios = listOf(Ratio("4:3", 4f / 3f), Ratio("1:1", 1f), Ratio("16:9", 16f / 9f), Ratio("XPan", 65f / 24f))
+    private val videoRatios = listOf(Ratio("16:9", 16f / 9f), Ratio("2.39:1", 2.39f))
+    private var photoRatioIdx = 0
+    private var videoRatioIdx = 0
+    private var assistOpen = false
+    private var gridOn = false
+    private var levelOn = false
+    private var histOn = false
+    private var peakOn = false
+    private var zebraOn = false
+    private var proTab = false
+    private var activeParam: ProParam? = null
+    private var sliderOpts: List<Opt<*>> = emptyList()
+    private var sliderBusy = false
+    private val sensorManager by lazy { getSystemService(SENSOR_SERVICE) as SensorManager }
+    private val levelListener = object : SensorEventListener {
+        override fun onSensorChanged(e: SensorEvent) {
+            val x = e.values[0]; val y = e.values[1]
+            val roll = Math.toDegrees(Math.atan2(x.toDouble(), y.toDouble())).toFloat()
+            var d = roll - b.overlay.roll
+            while (d > 180f) d -= 360f
+            while (d < -180f) d += 360f
+            var r = b.overlay.roll + d * 0.25f
+            if (r > 180f) r -= 360f
+            if (r < -180f) r += 360f
+            b.overlay.roll = r
+        }
+        override fun onAccuracyChanged(s: Sensor?, a: Int) {}
+    }
+
     private val permLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { res ->
         if (res[Manifest.permission.CAMERA] == true) maybeBind() else showToast("需要相机权限才能拍摄")
     }
@@ -101,8 +144,12 @@ class MainActivity : AppCompatActivity() {
             }
         })
 
+        renderer.onHistogram = { bins -> main.post { b.overlay.setHistogram(bins) } }
         buildStyleStrip()
         setupControls()
+        setupAssist()
+        setupPro()
+        main.post(uiTicker)
         setupGestures()
         refreshUi()
 
@@ -137,12 +184,14 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         if (orientationListener.canDetectOrientation()) orientationListener.enable()
+        if (levelOn) startLevel()
         maybeBind()
     }
 
     override fun onPause() {
         if (recorder != null) stopRecording()
         orientationListener.disable()
+        sensorManager.unregisterListener(levelListener)
         super.onPause()
     }
 
@@ -159,6 +208,9 @@ class MainActivity : AppCompatActivity() {
         cam.bind(this, captureFlashMode()) {
             cam.imageCapture?.targetRotation = surfaceRotation(orientation)
             if (cam.mode == Mode.VIDEO) cam.setTorch(false)
+            if (activeParam != null) openSlider(activeParam!!)
+            refreshPro()
+            refreshUi()
         }
     }
 
@@ -220,6 +272,7 @@ class MainActivity : AppCompatActivity() {
         b.modeVideo.setOnClickListener { switchMode(Mode.VIDEO) }
         b.btnFlip.setOnClickListener {
             if (recorder != null) return@setOnClickListener
+            cam.manual.reset()
             cam.lensFacing = if (cam.lensFacing == CameraSelector.LENS_FACING_BACK) CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
             maybeBind()
         }
@@ -231,6 +284,8 @@ class MainActivity : AppCompatActivity() {
         if (recorder != null || cam.mode == m) return
         cam.mode = m
         if (m == Mode.VIDEO && flashIdx == 2) flashIdx = 0
+        if (m == Mode.VIDEO && (cam.manual.exposureNs ?: 0L) > 33_333_333L) cam.manual.exposureNs = null
+        applyRatio()
         refreshUi()
         maybeBind()
     }
@@ -245,7 +300,27 @@ class MainActivity : AppCompatActivity() {
         b.btnTimer.text = if (timers[timerIdx] == 0) "定时 关" else "定时 ${timers[timerIdx]}s"
         b.btnFlash.text = when (flashIdx) { 1 -> "闪光 开"; 2 -> "闪光 自动"; else -> "闪光 关" }
         val photo = cam.mode == Mode.PHOTO
-        b.btnRatio.text = if (photo) "4:3" else "16:9 · 1080p"
+        b.btnRatio.text = if (photo) photoRatios[photoRatioIdx].label + (if (cam.rawActive) " RAW" else "") else videoRatios[videoRatioIdx].label + " · 1080p"
+        b.assistPanel.visibility = if (assistOpen) View.VISIBLE else View.GONE
+        b.btnAssist.text = if (assistOpen) "辅助 ▴" else "辅助 ▾"
+        b.asGrid.isSelected = gridOn
+        b.asLevel.isSelected = levelOn
+        b.asHist.isSelected = histOn
+        b.asPeak.isSelected = peakOn
+        b.asZebra.isSelected = zebraOn
+        b.asRaw.isSelected = cam.rawRequested
+        b.asRaw.alpha = if (photo) 1f else 0.4f
+        b.overlay.grid = gridOn
+        b.overlay.level = levelOn
+        b.overlay.showHistogram = histOn
+        renderer.peaking = peakOn
+        renderer.zebra = zebraOn
+        renderer.histogram = histOn
+        b.tabFx.setTextColor(if (!proTab) 0xFFFFB547.toInt() else 0x99FFFFFF.toInt())
+        b.tabPro.setTextColor(if (proTab) 0xFFFFB547.toInt() else 0x99FFFFFF.toInt())
+        b.fxRow.visibility = if (proTab) View.GONE else View.VISIBLE
+        b.proRow.visibility = if (proTab) View.VISIBLE else View.GONE
+        b.sliderRow.visibility = if (proTab && activeParam != null) View.VISIBLE else View.GONE
         b.modePhoto.setTextColor(if (photo) 0xFFFFB547.toInt() else 0x99FFFFFF.toInt())
         b.modeVideo.setTextColor(if (!photo) 0xFFFFB547.toInt() else 0x99FFFFFF.toInt())
         b.shutter.setImageResource(
@@ -270,7 +345,8 @@ class MainActivity : AppCompatActivity() {
             if (e.actionMasked == MotionEvent.ACTION_UP && !scale.isInProgress && e.eventTime - e.downTime < 250) {
                 val r = renderer.previewRect
                 if (r.width() > 0 && r.contains(e.x, e.y)) {
-                    cam.focusAt((e.x - r.left) / r.width(), (e.y - r.top) / r.height())
+                    val (fx, fy) = renderer.toFullContent((e.x - r.left) / r.width(), (e.y - r.top) / r.height())
+                    cam.focusAt(fx, fy)
                     showFocusRing(e.x, e.y)
                 }
             }
@@ -330,6 +406,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun takePhoto() {
         val ic = cam.imageCapture ?: return
+        if (cam.rawActive) { takeRaw(ic); return }
         busy = true
         b.shutter.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
         b.flashOverlay.alpha = 0.8f
@@ -341,7 +418,8 @@ class MainActivity : AppCompatActivity() {
                 val buf = image.planes[0].buffer
                 val bytes = ByteArray(buf.remaining()).also { buf.get(it) }
                 image.close()
-                val bmp = try { decodeUpright(bytes, rot, front) } catch (t: Throwable) { null }
+                val ratio = photoRatios[photoRatioIdx].r
+                val bmp = try { cropToRatio(decodeUpright(bytes, rot, front), ratio) } catch (t: Throwable) { null }
                 if (bmp == null) { main.post { busy = false; showToast("照片解码失败") }; return }
                 renderer.processStill(bmp) { out, err ->
                     bmp.recycle()
@@ -362,6 +440,43 @@ class MainActivity : AppCompatActivity() {
 
             override fun onError(exception: ImageCaptureException) {
                 main.post { busy = false; showToast("拍照失败: ${exception.message}") }
+            }
+        })
+    }
+
+    private fun cropToRatio(src: Bitmap, r: Float): Bitmap {
+        val w = src.width; val h = src.height
+        val target = if (w >= h) r else 1f / r
+        val cur = w.toFloat() / h
+        if (kotlin.math.abs(cur - target) < 0.01f) return src
+        val (cw, ch) = if (cur > target) Pair((h * target).toInt(), h) else Pair(w, (w / target).toInt())
+        val out = Bitmap.createBitmap(src, (w - cw) / 2, (h - ch) / 2, cw, ch)
+        if (out !== src) src.recycle()
+        return out
+    }
+
+    private fun takeRaw(ic: ImageCapture) {
+        busy = true
+        b.shutter.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+        b.flashOverlay.alpha = 0.8f
+        b.flashOverlay.animate().alpha(0f).setDuration(250).start()
+        val name = "RetroCam_" + java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date())
+        val values = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, "$name.dng")
+            put(MediaStore.Images.Media.MIME_TYPE, "image/x-adobe-dng")
+            put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_DCIM + "/RetroCam")
+        }
+        val opts = ImageCapture.OutputFileOptions.Builder(contentResolver, MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values).build()
+        ic.takePicture(opts, io, object : ImageCapture.OnImageSavedCallback {
+            override fun onImageSaved(res: ImageCapture.OutputFileResults) {
+                main.post {
+                    busy = false
+                    lastUri = res.savedUri; lastIsVideo = false
+                    showToast("RAW 已保存（DNG，不含风格）")
+                }
+            }
+            override fun onError(e: ImageCaptureException) {
+                main.post { busy = false; showToast("RAW 失败: ${e.message}") }
             }
         })
     }
@@ -446,6 +561,150 @@ class MainActivity : AppCompatActivity() {
         } catch (_: Throwable) { showToast("没有可打开的相册应用") }
     }
 
+    // ---------------- Phase 2: assist, ratio, pro ----------------
+
+    private fun applyRatio() {
+        val r = if (cam.mode == Mode.PHOTO) photoRatios[photoRatioIdx].r else videoRatios[videoRatioIdx].r
+        renderer.cropAspect = 1f / r
+    }
+
+    private fun startLevel() {
+        val s = sensorManager.getDefaultSensor(Sensor.TYPE_GRAVITY) ?: sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) ?: return
+        sensorManager.registerListener(levelListener, s, SensorManager.SENSOR_DELAY_UI)
+    }
+
+    private fun setupAssist() {
+        applyRatio()
+        b.btnAssist.setOnClickListener { assistOpen = !assistOpen; refreshUi() }
+        b.btnRatio.setOnClickListener {
+            if (recorder != null) return@setOnClickListener
+            if (cam.mode == Mode.PHOTO) photoRatioIdx = (photoRatioIdx + 1) % photoRatios.size
+            else videoRatioIdx = (videoRatioIdx + 1) % videoRatios.size
+            applyRatio(); refreshUi(); savePrefs()
+        }
+        b.asGrid.setOnClickListener { gridOn = !gridOn; refreshUi(); savePrefs() }
+        b.asLevel.setOnClickListener {
+            levelOn = !levelOn
+            if (levelOn) startLevel() else sensorManager.unregisterListener(levelListener)
+            refreshUi(); savePrefs()
+        }
+        b.asHist.setOnClickListener { histOn = !histOn; refreshUi(); savePrefs() }
+        b.asPeak.setOnClickListener { peakOn = !peakOn; refreshUi(); savePrefs() }
+        b.asZebra.setOnClickListener { zebraOn = !zebraOn; refreshUi(); savePrefs() }
+        b.asRaw.setOnClickListener {
+            if (cam.mode != Mode.PHOTO) { showToast("RAW 仅拍照模式可用"); return@setOnClickListener }
+            if (cam.caps?.rawSupported != true) { showToast("这颗镜头不支持 RAW"); return@setOnClickListener }
+            cam.rawRequested = !cam.rawRequested
+            showToast(if (cam.rawRequested) "RAW 开：保存 DNG 原片，不套风格" else "RAW 关")
+            maybeBind()
+        }
+    }
+
+    private fun setupPro() {
+        b.tabFx.setOnClickListener { proTab = false; refreshUi() }
+        b.tabPro.setOnClickListener { proTab = true; refreshPro(); refreshUi() }
+        val map = mapOf(b.proIso to ProParam.ISO, b.proShutter to ProParam.SHUTTER, b.proEv to ProParam.EV, b.proWb to ProParam.WB, b.proFocus to ProParam.FOCUS)
+        for ((v, p) in map) v.setOnClickListener {
+            if (activeParam == p) { activeParam = null } else openSlider(p)
+            refreshPro(); refreshUi()
+        }
+        b.proReset.setOnClickListener {
+            cam.manual.reset(); cam.applyManual(); activeParam = null
+            refreshPro(); refreshUi(); showToast("已恢复全自动")
+        }
+        b.slider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar, progress: Int, fromUser: Boolean) {
+                if (!fromUser || sliderBusy) return
+                setParamIndex(progress)
+            }
+            override fun onStartTrackingTouch(sb: SeekBar) {}
+            override fun onStopTrackingTouch(sb: SeekBar) {}
+        })
+        b.sliderAuto.setOnClickListener {
+            val p = activeParam ?: return@setOnClickListener
+            val idx = if (p == ProParam.EV) sliderOpts.indexOfFirst { it.value == 0 }.coerceAtLeast(0) else 0
+            setParamIndex(idx)
+            sliderBusy = true; b.slider.progress = idx; sliderBusy = false
+        }
+    }
+
+    private fun optionsFor(p: ProParam): List<Opt<*>> {
+        val caps = cam.caps ?: return emptyList()
+        return when (p) {
+            ProParam.ISO -> ManualOptions.iso(caps)
+            ProParam.SHUTTER -> ManualOptions.shutter(caps, cam.mode == Mode.VIDEO)
+            ProParam.EV -> ManualOptions.ev(caps)
+            ProParam.WB -> ManualOptions.wb(caps)
+            ProParam.FOCUS -> ManualOptions.focus(caps)
+        }
+    }
+
+    private fun openSlider(p: ProParam) {
+        val opts = optionsFor(p)
+        if (opts.size <= 1) {
+            activeParam = null
+            showToast(if (p == ProParam.FOCUS) "这颗镜头不支持手动对焦" else "这颗镜头不支持手动调节")
+            return
+        }
+        activeParam = p
+        sliderOpts = opts
+        val m = cam.manual
+        val idx = when (p) {
+            ProParam.ISO -> opts.indexOfFirst { it.value == m.iso }
+            ProParam.SHUTTER -> opts.indexOfFirst { it.value == m.exposureNs }
+            ProParam.EV -> opts.indexOfFirst { it.value == m.evIndex }
+            ProParam.WB -> opts.indexOfFirst { it.value == m.awbMode }
+            ProParam.FOCUS -> if (m.focusDiopters == null) 0 else opts.indices.minByOrNull { i -> kotlin.math.abs(((opts[i].value as? Float) ?: -99f) - m.focusDiopters!!) } ?: 0
+        }.coerceAtLeast(0)
+        sliderBusy = true
+        b.slider.max = opts.size - 1
+        b.slider.progress = idx
+        sliderBusy = false
+        b.sliderLabel.text = opts[idx].label
+        b.sliderAuto.visibility = View.VISIBLE
+    }
+
+    private fun setParamIndex(i: Int) {
+        val p = activeParam ?: return
+        val o = sliderOpts.getOrNull(i) ?: return
+        val m = cam.manual
+        when (p) {
+            ProParam.ISO -> m.iso = o.value as Int?
+            ProParam.SHUTTER -> m.exposureNs = o.value as Long?
+            ProParam.EV -> m.evIndex = (o.value as Int?) ?: 0
+            ProParam.WB -> m.awbMode = (o.value as Int?) ?: android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_AUTO
+            ProParam.FOCUS -> m.focusDiopters = o.value as Float?
+        }
+        cam.applyManual()
+        b.sliderLabel.text = o.label
+        refreshPro()
+    }
+
+    private fun refreshPro() {
+        val m = cam.manual
+        val isoAuto = m.iso == null
+        val sAuto = m.exposureNs == null
+        b.proIso.text = "ISO " + (if (isoAuto) "A·" + (cam.liveIso.takeIf { it > 0 }?.toString() ?: "--") else m.iso.toString())
+        b.proShutter.text = "S " + (if (sAuto) "A·" + ManualOptions.shutterLabel(cam.liveExposureNs) else ManualOptions.shutterLabel(m.exposureNs!!))
+        val step = cam.caps?.evStep ?: 0f
+        b.proEv.text = "EV " + if (m.evIndex == 0) "0" else String.format(java.util.Locale.US, "%+.1f", m.evIndex * step)
+        b.proWb.text = "WB " + (cam.caps?.let { c -> ManualOptions.wb(c).firstOrNull { it.value == m.awbMode }?.label } ?: "自动")
+        b.proFocus.text = "MF " + (m.focusDiopters?.let { ManualOptions.focusLabel(it) } ?: "A")
+        b.proIso.isSelected = activeParam == ProParam.ISO || !isoAuto
+        b.proShutter.isSelected = activeParam == ProParam.SHUTTER || !sAuto
+        b.proEv.isSelected = activeParam == ProParam.EV || m.evIndex != 0
+        b.proWb.isSelected = activeParam == ProParam.WB || m.awbMode != android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_AUTO
+        b.proFocus.isSelected = activeParam == ProParam.FOCUS || m.focusDiopters != null
+    }
+
+    private val uiTicker = object : Runnable {
+        override fun run() {
+            b.overlay.rect = renderer.previewRect
+            if (proTab) refreshPro()
+            main.postDelayed(this, 250)
+        }
+    }
+
     // ---------------- prefs ----------------
 
     private fun loadPrefs() {
@@ -455,6 +714,13 @@ class MainActivity : AppCompatActivity() {
         leakOn = prefs.getBoolean("leak", false)
         intensityIdx = prefs.getInt("intensity", 0).coerceIn(0, intensities.size - 1)
         params.dateStamp = prefs.getBoolean("date", true)
+        photoRatioIdx = prefs.getInt("pratio", 0).coerceIn(0, photoRatios.size - 1)
+        videoRatioIdx = prefs.getInt("vratio", 0).coerceIn(0, videoRatios.size - 1)
+        gridOn = prefs.getBoolean("grid", false)
+        levelOn = prefs.getBoolean("level", false)
+        histOn = prefs.getBoolean("hist", false)
+        peakOn = prefs.getBoolean("peak", false)
+        zebraOn = prefs.getBoolean("zebra", false)
         params.stampKind = Styles.all.first { it.id == params.style }.stamp
         applyFx()
     }
@@ -467,6 +733,13 @@ class MainActivity : AppCompatActivity() {
             .putBoolean("leak", leakOn)
             .putInt("intensity", intensityIdx)
             .putBoolean("date", params.dateStamp)
+            .putInt("pratio", photoRatioIdx)
+            .putInt("vratio", videoRatioIdx)
+            .putBoolean("grid", gridOn)
+            .putBoolean("level", levelOn)
+            .putBoolean("hist", histOn)
+            .putBoolean("peak", peakOn)
+            .putBoolean("zebra", zebraOn)
             .apply()
     }
 }

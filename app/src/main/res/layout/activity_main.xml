@@ -10,6 +10,11 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
+    <com.hq.retrocam.ui.OverlayView
+        android:id="@+id/overlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
     <View
         android:id="@+id/flashOverlay"
         android:layout_width="match_parent"
@@ -33,9 +38,36 @@
 
         <TextView android:id="@+id/btnFlash" style="@style/TopBtn" android:text="闪光 关" />
         <TextView android:id="@+id/btnTimer" style="@style/TopBtn" android:text="定时 关" />
-        <TextView android:id="@+id/btnDate" style="@style/TopBtn" android:text="日期 开" />
         <TextView android:id="@+id/btnRatio" style="@style/TopBtn" android:text="4:3" />
+        <TextView android:id="@+id/btnDate" style="@style/TopBtn" android:text="日期 开" />
+        <TextView android:id="@+id/btnAssist" style="@style/TopBtn" android:text="辅助 ▾" />
     </LinearLayout>
+
+    <HorizontalScrollView
+        android:id="@+id/assistPanel"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top"
+        android:layout_marginTop="84dp"
+        android:background="@color/panel"
+        android:paddingTop="8dp"
+        android:paddingBottom="8dp"
+        android:scrollbars="none"
+        android:visibility="gone">
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp">
+            <TextView android:id="@+id/asGrid" style="@style/FxChip" android:text="网格" />
+            <TextView android:id="@+id/asLevel" style="@style/FxChip" android:text="水平仪" />
+            <TextView android:id="@+id/asHist" style="@style/FxChip" android:text="直方图" />
+            <TextView android:id="@+id/asPeak" style="@style/FxChip" android:text="峰值对焦" />
+            <TextView android:id="@+id/asZebra" style="@style/FxChip" android:text="斑马纹" />
+            <TextView android:id="@+id/asRaw" style="@style/FxChip" android:text="RAW" />
+        </LinearLayout>
+    </HorizontalScrollView>
 
     <!-- Recording HUD -->
     <LinearLayout
@@ -94,11 +126,60 @@
         android:paddingBottom="28dp">
 
         <LinearLayout
+            android:id="@+id/sliderRow"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="16dp"
+            android:paddingTop="10dp"
+            android:paddingEnd="12dp"
+            android:visibility="gone">
+            <TextView android:id="@+id/sliderLabel" android:layout_width="84dp" android:layout_height="wrap_content"
+                android:fontFamily="monospace" android:textColor="#FFB547" android:textSize="15sp" android:textStyle="bold" />
+            <SeekBar android:id="@+id/slider" android:layout_width="0dp" android:layout_height="36dp" android:layout_weight="1" />
+            <TextView android:id="@+id/sliderAuto" style="@style/FxChip" android:text="A" />
+        </LinearLayout>
+
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:gravity="center"
             android:orientation="horizontal"
             android:paddingTop="10dp">
+            <TextView android:id="@+id/tabFx" style="@style/ModeText" android:textSize="13sp" android:text="效果" />
+            <TextView android:id="@+id/tabPro" style="@style/ModeText" android:textSize="13sp" android:text="专业" />
+        </LinearLayout>
+
+        <HorizontalScrollView
+            android:id="@+id/proRow"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:scrollbars="none"
+            android:visibility="gone">
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:paddingStart="8dp"
+                android:paddingEnd="8dp">
+                <TextView android:id="@+id/proIso" style="@style/FxChip" android:fontFamily="monospace" android:text="ISO A" />
+                <TextView android:id="@+id/proShutter" style="@style/FxChip" android:fontFamily="monospace" android:text="S A" />
+                <TextView android:id="@+id/proEv" style="@style/FxChip" android:fontFamily="monospace" android:text="EV 0" />
+                <TextView android:id="@+id/proWb" style="@style/FxChip" android:text="WB 自动" />
+                <TextView android:id="@+id/proFocus" style="@style/FxChip" android:fontFamily="monospace" android:text="MF A" />
+                <TextView android:id="@+id/proReset" style="@style/FxChip" android:text="全自动" />
+            </LinearLayout>
+        </HorizontalScrollView>
+
+        <LinearLayout
+            android:id="@+id/fxRow"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:orientation="horizontal"
+            android:paddingTop="6dp">
             <TextView android:id="@+id/fxGrain" style="@style/FxChip" android:text="颗粒" />
             <TextView android:id="@+id/fxVignette" style="@style/FxChip" android:text="暗角" />
             <TextView android:id="@+id/fxLeak" style="@style/FxChip" android:text="漏光" />

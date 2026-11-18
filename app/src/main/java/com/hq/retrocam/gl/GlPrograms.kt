@@ -109,8 +109,20 @@ class LookProgram(oes: Boolean) {
     private val uTime = GLES30.glGetUniformLocation(id, "uTime")
     private val uAspect = GLES30.glGetUniformLocation(id, "uAspect")
     private val uFlipY = GLES30.glGetUniformLocation(id, "uFlipY")
+    private val uCrop = GLES30.glGetUniformLocation(id, "uCrop")
+    private val uPeaking = GLES30.glGetUniformLocation(id, "uPeaking")
+    private val uZebra = GLES30.glGetUniformLocation(id, "uZebra")
+    private val uTexel = GLES30.glGetUniformLocation(id, "uTexel")
 
-    fun draw(tex: Int, texMatrix: FloatArray, p: LookParams, time: Float, aspect: Float, flipY: Boolean = false) {
+    fun draw(
+        tex: Int, texMatrix: FloatArray, p: LookParams, time: Float, aspect: Float, flipY: Boolean = false,
+        crop: FloatArray = NO_CROP, peaking: Boolean = false, zebra: Boolean = false, texelX: Float = 0.001f, texelY: Float = 0.001f,
+    ) {
+        GLES30.glUseProgram(id)
+        GLES30.glUniform4f(uCrop, crop[0], crop[1], crop[2], crop[3])
+        GLES30.glUniform1f(uPeaking, if (peaking) 1f else 0f)
+        GLES30.glUniform1f(uZebra, if (zebra) 1f else 0f)
+        GLES30.glUniform2f(uTexel, texelX, texelY)
         GLES30.glUseProgram(id)
         GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
         GLES30.glBindTexture(target, tex)
@@ -127,6 +139,8 @@ class LookProgram(oes: Boolean) {
         Quad.draw(Quad.full)
     }
 }
+
+val NO_CROP = floatArrayOf(0f, 0f, 1f, 1f)
 
 class OverlayProgram {
     val id = Gl.program(Shaders.VERTEX, Shaders.OVERLAY_FRAGMENT)

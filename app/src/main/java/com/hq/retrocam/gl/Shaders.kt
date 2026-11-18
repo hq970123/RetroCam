@@ -38,10 +38,14 @@ uniform float uGrain;
 uniform float uVignette;
 uniform float uLeak;
 uniform float uTime;
-uniform float uAspect;   // width / height of content
+uniform float uAspect;   // width / height of (cropped) content
+uniform vec4 uCrop;      // xy offset, zw scale into full content uv
+uniform float uPeaking;
+uniform float uZebra;
+uniform vec2 uTexel;     // one source pixel in output uv
 
 vec3 src(vec2 uv) {
-    uv = clamp(uv, vec2(0.001), vec2(0.999));
+    uv = uCrop.xy + clamp(uv, vec2(0.001), vec2(0.999)) * uCrop.zw;
     return texture(uTex, (uTexMatrix * vec4(uv, 0.0, 1.0)).xy).rgb;
 }
 
@@ -259,6 +263,27 @@ void main() {
         float l = luma(c);
         float amt = uGrain * 0.11 * (1.0 - abs(l - 0.5) * 1.3);
         c += n * amt;
+    }
+
+    // focus peaking (Sobel on source luma)
+    if (uPeaking > 0.0) {
+        vec2 t = uTexel * 1.5;
+        float tl = luma(src(uv + vec2(-t.x, t.y))), tc = luma(src(uv + vec2(0.0, t.y))), tr = luma(src(uv + t));
+        float ml = luma(src(uv - vec2(t.x, 0.0))), mr = luma(src(uv + vec2(t.x, 0.0)));
+        float bl = luma(src(uv - t)), bc = luma(src(uv - vec2(0.0, t.y))), br = luma(src(uv + vec2(t.x, -t.y)));
+        float gx = (tr + 2.0 * mr + br) - (tl + 2.0 * ml + bl);
+        float gy = (tl + 2.0 * tc + tr) - (bl + 2.0 * bc + br);
+        float e = length(vec2(gx, gy));
+        c = mix(c, vec3(1.0, 0.12, 0.08), smoothstep(0.22, 0.4, e));
+    }
+
+    // zebra stripes on clipped highlights
+    if (uZebra > 0.0) {
+        float l = luma(c);
+        if (l > 0.95) {
+            float st = step(0.5, fract((gl_FragCoord.x + gl_FragCoord.y) / 14.0));
+            c = mix(c, vec3(0.05), st * 0.7);
+        }
     }
 
     fragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
