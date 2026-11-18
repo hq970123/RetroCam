@@ -76,6 +76,151 @@ class CameraRenderer(private val params: LookParams) {
 
     private var usePre = false
 
+    // ---------------- Phase 4: multi-frame accumulation (slow shutter / light painting) ----------------
+
+    enum class AccumMode { AVERAGE, LIGHTEN }
+
+    private class AccumJob(
+        val mode: AccumMode,
+        val durationNs: Long,
+        val onProgress: (Float, Int) -> Unit,
+        val onDone: (Bitmap?, Throwable?) -> Unit,
+    ) {
+        var startNs = 0L
+        var frames = 0
+        var seen = 0
+        var skip = 1
+        @Volatile var stop = false
+        @Volatile var cancel = false
+    }
+
+    private var accum: AccumJob? = null
+    private var accFbo = 0
+    private var accTex = 0
+    private var accW = 0
+    private var accH = 0
+    private var accFloat = false
+
+    /** True while a multi-frame exposure is being built. */
+    @Volatile var accumulating = false
+        private set
+
+    /**
+     * Builds one image out of the camera frames: AVERAGE = long exposure / motion blur,
+     * LIGHTEN = light painting. durationMs 0 means "until [stopAccumulation]".
+     * Result is an upright (portrait-content) bitmap without look applied, delivered on the GL thread.
+     */
+    fun startAccumulation(mode: AccumMode, durationMs: Long, onProgress: (Float, Int) -> Unit, onDone: (Bitmap?, Throwable?) -> Unit) = handler.post {
+        accum?.let { it.cancel = true; finishAccum(it) }
+        accum = AccumJob(mode, durationMs * 1_000_000L, onProgress, onDone)
+        accumulating = true
+    }
+
+    fun stopAccumulation() = handler.post { accum?.stop = true }
+    fun cancelAccumulation() = handler.post { accum?.let { it.cancel = true; finishAccum(it) } }
+
+    private fun ensureAccTarget(w: Int, h: Int) {
+        if (accFbo != 0 && accW == w && accH == h) return
+        if (accTex == 0) accTex = Gl.createTexture2D(null)
+        if (accFbo == 0) { val f = IntArray(1); GLES30.glGenFramebuffers(1, f, 0); accFbo = f[0] }
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, accTex)
+        // Half-float keeps an average of hundreds of frames smooth; fall back to 8-bit if it can't be rendered to.
+        GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA16F, w, h, 0, GLES30.GL_RGBA, GLES30.GL_HALF_FLOAT, null)
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, accFbo)
+        GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0, GLES30.GL_TEXTURE_2D, accTex, 0)
+        accFloat = GLES30.glCheckFramebufferStatus(GLES30.GL_FRAMEBUFFER) == GLES30.GL_FRAMEBUFFER_COMPLETE
+        if (!accFloat) {
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, accTex)
+            GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA, w, h, 0, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, null)
+            GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0, GLES30.GL_TEXTURE_2D, accTex, 0)
+        }
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+        accW = w; accH = h
+    }
+
+    private fun accumulate(job: AccumJob) {
+        val now = System.nanoTime()
+        if (job.startNs == 0L) {
+            job.startNs = now
+            ensureAccTarget(contentW, contentH)
+            // 8-bit fallback: keep the running average to ~16 frames so it doesn't stall from rounding
+            job.skip = if (!accFloat && job.mode == AccumMode.AVERAGE && job.durationNs > 0)
+                maxOf(1, Math.ceil(job.durationNs / 1e9 * 30.0 / 16.0).toInt()) else 1
+        }
+        val elapsed = now - job.startNs
+        val take = job.seen++ % job.skip == 0
+        if (take) {
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, accFbo)
+            GLES30.glViewport(0, 0, accW, accH)
+            if (job.frames > 0) {
+                GLES30.glEnable(GLES30.GL_BLEND)
+                if (job.mode == AccumMode.LIGHTEN) {
+                    GLES30.glBlendEquation(GLES30.GL_MAX)
+                    GLES30.glBlendFunc(GLES30.GL_ONE, GLES30.GL_ONE)
+                } else {
+                    GLES30.glBlendEquation(GLES30.GL_FUNC_ADD)
+                    GLES30.glBlendColor(0f, 0f, 0f, 1f / (job.frames + 1))
+                    GLES30.glBlendFunc(GLES30.GL_CONSTANT_ALPHA, GLES30.GL_ONE_MINUS_CONSTANT_ALPHA)
+                }
+            }
+            colorProgram.draw(oesTex, texMatrix, ColorState.NONE, null)
+            GLES30.glDisable(GLES30.GL_BLEND)
+            GLES30.glBlendEquation(GLES30.GL_FUNC_ADD)
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+            job.frames++
+        }
+        val frac = if (job.durationNs > 0) (elapsed.toFloat() / job.durationNs).coerceAtMost(1f) else elapsed / 1e9f
+        if (job.seen % 3 == 0) job.onProgress(frac, job.frames)
+        if (job.stop || (job.durationNs > 0 && elapsed >= job.durationNs)) finishAccum(job)
+    }
+
+    private fun finishAccum(job: AccumJob) {
+        if (accum !== job) return
+        accum = null
+        accumulating = false
+        if (job.cancel || job.frames == 0) { job.onDone(null, null); return }
+        var fbo = 0; var tex = 0
+        try {
+            val w = accW; val h = accH
+            tex = Gl.createTexture2D(null)
+            GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA, w, h, 0, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, null)
+            val f = IntArray(1); GLES30.glGenFramebuffers(1, f, 0); fbo = f[0]
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, fbo)
+            GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0, GLES30.GL_TEXTURE_2D, tex, 0)
+            GLES30.glViewport(0, 0, w, h)
+            Gl.posRot = Gl.IDENTITY_ROT
+            look2d.draw(accTex, identity, cleanParams, 0f, w.toFloat() / h)
+            val buf = ByteBuffer.allocateDirect(w * h * 4).order(ByteOrder.nativeOrder())
+            GLES30.glReadPixels(0, 0, w, h, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, buf)
+            buf.rewind()
+            val raw = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            raw.copyPixelsFromBuffer(buf)
+            // GL rows are bottom-up
+            val m = android.graphics.Matrix().apply { postScale(1f, -1f) }
+            val out = Bitmap.createBitmap(raw, 0, 0, w, h, m, false)
+            if (out !== raw) raw.recycle()
+            job.onDone(out, null)
+        } catch (t: Throwable) {
+            Log.e(tag, "accum readback", t)
+            job.onDone(null, t)
+        } finally {
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+            if (fbo != 0) GLES30.glDeleteFramebuffers(1, intArrayOf(fbo), 0)
+            Gl.deleteTexture(tex)
+        }
+    }
+
+    // ---------------- Phase 4: timelapse ----------------
+
+    /** Capture interval for timelapse recording (0 = normal video). */
+    @Volatile var timelapseIntervalNs = 0L
+    /** Frames written in the current timelapse. */
+    @Volatile var tlFrames = 0L
+        private set
+    private var tlNext = 0L
+    private var tlBase = 0L
+    private var encFps = 30
+
     /** Draws the look for the current frame into the current viewport. */
     private fun drawLook(time: Float, aspect: Float, crop: FloatArray, peaking: Boolean = false, zebra: Boolean = false, texelX: Float = 0.001f, texelY: Float = 0.001f) {
         if (usePre) look2d.draw(preTex, identity, params, time, aspect, crop = crop, peaking = peaking, zebra = zebra, texelX = texelX, texelY = texelY)
@@ -248,6 +393,12 @@ class CameraRenderer(private val params: LookParams) {
                 egl.makeCurrent(displaySurface ?: encSurface!!)
                 prePass(cs)
             }
+            val job = accum
+            if (job != null && updateTex) {
+                egl.makeCurrent(displaySurface ?: encSurface!!)
+                accumulate(job)
+            }
+            val showAcc = accumulating && accTex != 0
 
             displaySurface?.let { ds ->
                 egl.makeCurrent(ds)
@@ -271,15 +422,29 @@ class CameraRenderer(private val params: LookParams) {
                 val vy = displayH - vyTop - vh
                 previewRect = android.graphics.RectF(vx.toFloat(), vyTop.toFloat(), (vx + vw).toFloat(), (vyTop + vh).toFloat())
                 GLES30.glViewport(vx, vy, vw, vh)
-                drawLook(time, aspect, crop, peaking = peaking, zebra = zebra,
+                if (showAcc) look2d.draw(accTex, identity, params, time, aspect, crop = crop)
+                else drawLook(time, aspect, crop, peaking = peaking, zebra = zebra,
                     texelX = 1f / maxOf(1f, cw), texelY = 1f / maxOf(1f, ch))
-                if (params.dateStamp && stampTex != 0) {
+                if (params.dateStamp && stampTex != 0 && !showAcc) {
                     overlay.drawStamp(stampTex, stampBw, stampBh, cw.toInt(), ch.toInt(), orientation, Stamp.widthFrac(params.stampKind))
                 }
                 egl.swap(ds)
             }
 
-            encSurface?.let { es ->
+            var encodeNow = true
+            var pts = System.nanoTime()
+            if (encSurface != null && timelapseIntervalNs > 0) {
+                val now = System.nanoTime()
+                if (!updateTex || now < tlNext) encodeNow = false
+                else {
+                    if (tlNext == 0L) { tlNext = now; tlBase = now }
+                    tlNext += timelapseIntervalNs
+                    if (tlNext < now) tlNext = now + timelapseIntervalNs
+                    pts = tlBase + tlFrames * 1_000_000_000L / encFps
+                    tlFrames++
+                }
+            }
+            if (encodeNow) encSurface?.let { es ->
                 egl.makeCurrent(es)
                 GLES30.glViewport(0, 0, encW, encH)
                 GLES30.glClearColor(0f, 0f, 0f, 1f)
@@ -301,7 +466,7 @@ class CameraRenderer(private val params: LookParams) {
                     }
                 }
                 Gl.posRot = Gl.IDENTITY_ROT
-                egl.setPresentationTime(es, System.nanoTime())
+                egl.setPresentationTime(es, pts)
                 egl.swap(es)
             }
         } catch (t: Throwable) {
@@ -309,7 +474,8 @@ class CameraRenderer(private val params: LookParams) {
         }
     }
 
-    fun startRecording(rec: VideoRecorder, w: Int, h: Int, rotation: Int) = handler.post {
+    fun startRecording(rec: VideoRecorder, w: Int, h: Int, rotation: Int, fps: Int = 30) = handler.post {
+        tlFrames = 0; tlNext = 0L; tlBase = 0L; encFps = fps
         encSurface = egl.createWindowSurface(rec.inputSurface)
         recorder = rec
         encW = w; encH = h
@@ -327,7 +493,7 @@ class CameraRenderer(private val params: LookParams) {
     }
 
     /** Applies the current look to an upright bitmap. Callback on the GL thread. */
-    fun processStill(input: Bitmap, onDone: (Bitmap?, Throwable?) -> Unit) = handler.post {
+    fun processStill(input: Bitmap, p: LookParams = params, onDone: (Bitmap?, Throwable?) -> Unit) = handler.post {
         var fbo = 0; var outTex = 0; var inTex = 0; var stTex = 0
         try {
             egl.makeCurrent(pbuffer)
@@ -349,9 +515,9 @@ class CameraRenderer(private val params: LookParams) {
             GLES30.glViewport(0, 0, w, h)
             val flipV = floatArrayOf(1f, 0f, 0f, 0f, 0f, -1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 1f, 0f, 1f)
             Gl.posRot = Gl.IDENTITY_ROT
-            prog.draw(inTex, flipV, params, 37.5f, w.toFloat() / h, flipY = true, colorState = color.copy(logIn = 0), lut = lutTex)
-            if (params.dateStamp) {
-                val kind = params.stampKind
+            prog.draw(inTex, flipV, p, 37.5f, w.toFloat() / h, flipY = true, colorState = color.copy(logIn = 0), lut = lutTex)
+            if (p.dateStamp) {
+                val kind = p.stampKind
                 val frac = Stamp.widthFrac(kind)
                 val ratio = if (kind == StampKind.FILM) 4 else 3
                 val bh = (frac * w / ratio).toInt().coerceIn(48, 1024)

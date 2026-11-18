@@ -30,6 +30,22 @@ object MediaSaver {
         return uri
     }
 
+    fun saveJpegBytes(ctx: Context, bytes: ByteArray, prefix: String = "RetroCam_"): Uri? {
+        val values = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, "$prefix${stamp()}.jpg")
+            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+            put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_DCIM + "/RetroCam")
+            put(MediaStore.Images.Media.IS_PENDING, 1)
+        }
+        val r = ctx.contentResolver
+        val uri = r.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return null
+        r.openOutputStream(uri)?.use { it.write(bytes) }
+        values.clear()
+        values.put(MediaStore.Images.Media.IS_PENDING, 0)
+        r.update(uri, values, null, null)
+        return uri
+    }
+
     fun saveVideo(ctx: Context, file: File): Uri? {
         val values = ContentValues().apply {
             put(MediaStore.Video.Media.DISPLAY_NAME, "RetroCam_${stamp()}.mp4")

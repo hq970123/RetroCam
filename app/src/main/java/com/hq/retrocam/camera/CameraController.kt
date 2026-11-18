@@ -62,6 +62,9 @@ class CameraCaps(
     val previewStab: Boolean,
     val eis: Boolean,
     val ois: Boolean,
+    /** 35mm-equivalent focal length, mm (0 if unknown). */
+    val equivFocal: Int = 0,
+    val aperture: Float = 0f,
 )
 
 class CameraController(private val context: Context, private val renderer: CameraRenderer) {
@@ -74,6 +77,8 @@ class CameraController(private val context: Context, private val renderer: Camer
     var lensFacing = CameraSelector.LENS_FACING_BACK
     var mode = Mode.PHOTO
     var rawRequested = false
+    /** Larger photo preview stream (used by slow shutter / light painting, which build the image from preview frames). */
+    var hiResPreview = false
     /** True when the bound ImageCapture writes DNG. */
     var rawActive = false
         private set
@@ -134,11 +139,11 @@ class CameraController(private val context: Context, private val renderer: Camer
         val fmt = if (photo) null else (videoFormat?.let { v -> c?.videoFormats?.firstOrNull { it.w == v.w && it.h == v.h && it.fps == v.fps } }
             ?: c?.videoFormats?.firstOrNull { it.h == 1080 && it.fps == 30 })
         val ratio = if (photo) AspectRatio.RATIO_4_3 else AspectRatio.RATIO_16_9
-        val previewTarget = if (photo) Size(1440, 1080) else Size(fmt?.w ?: 1920, fmt?.h ?: 1080)
+        val previewTarget = if (photo) (if (hiResPreview) Size(2560, 1920) else Size(1440, 1080)) else Size(fmt?.w ?: 1920, fmt?.h ?: 1080)
         val previewSelector = ResolutionSelector.Builder()
             .setAspectRatioStrategy(AspectRatioStrategy(ratio, AspectRatioStrategy.FALLBACK_RULE_AUTO))
             .setResolutionStrategy(ResolutionStrategy(previewTarget,
-                if (photo) ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER else ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER))
+                if (photo && !hiResPreview) ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER else ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER))
             .build()
         val previewBuilder = Preview.Builder()
             .setResolutionSelector(previewSelector)
@@ -283,7 +288,17 @@ class CameraController(private val context: Context, private val renderer: Camer
             evStep = ev.exposureCompensationStep.toFloat(),
             awbModes = awb,
             rawSupported = raw,
+            equivFocal = try { equivFocal(c2) } catch (_: Throwable) { 0 },
+            aperture = c2.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_APERTURES)?.firstOrNull() ?: 0f,
         )
+    }
+
+    private fun equivFocal(c2: Camera2CameraInfo): Int {
+        val f = c2.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull() ?: return 0
+        val sz = c2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE) ?: return 0
+        val diag = Math.hypot(sz.width.toDouble(), sz.height.toDouble())
+        if (diag <= 0.0) return 0
+        return Math.round(f * 43.27 / diag).toInt()
     }
 
     /** Pushes the manual overrides to the running camera. */
