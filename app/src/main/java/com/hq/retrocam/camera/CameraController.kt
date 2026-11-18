@@ -31,6 +31,13 @@ import java.util.concurrent.TimeUnit
 
 enum class Mode { PHOTO, VIDEO }
 
+/** A recording format: stream size (landscape) and frame rate. */
+data class VideoFormat(val w: Int, val h: Int, val fps: Int, val fpsRange: Range<Int>) {
+    val label: String get() = (if (h >= 2160) "4K" else "${h}p") + " $fps"
+}
+
+enum class Stab { OFF, PREVIEW, VIDEO_EIS, OIS_ONLY }
+
 /** Manual overrides; null = auto. */
 class ManualSettings {
     var iso: Int? = null
@@ -49,6 +56,12 @@ class CameraCaps(
     val evStep: Float,
     val awbModes: IntArray,
     val rawSupported: Boolean,
+    val tonemapCurve: Boolean,
+    val maxCurvePoints: Int,
+    val videoFormats: List<VideoFormat>,
+    val previewStab: Boolean,
+    val eis: Boolean,
+    val ois: Boolean,
 )
 
 class CameraController(private val context: Context, private val renderer: CameraRenderer) {
@@ -67,6 +80,23 @@ class CameraController(private val context: Context, private val renderer: Camer
     var caps: CameraCaps? = null
         private set
     val manual = ManualSettings()
+
+    /** Requested video format (null = 1080p30 default). */
+    var videoFormat: VideoFormat? = null
+    var stabRequested = true
+    /** Log profile requested (video only). */
+    var logRequested = false
+    /** Stabilisation actually applied at the last bind. */
+    var stabActive = Stab.OFF
+        private set
+    /** True when the camera's tone curve is replaced by our log curve. */
+    val logHardware: Boolean get() = mode == Mode.VIDEO && logRequested && caps?.tonemapCurve == true
+    /** EV the log mode pulls exposure down by (actual, after rounding to the camera's step). */
+    @Volatile var logEvOffset = 0f
+        private set
+    /** Frame-rate / size of the stream actually granted. */
+    var boundFormat: VideoFormat? = null
+        private set
 
     /** Latest values reported by the camera (auto or manual). */
     @Volatile var liveIso = 0
@@ -97,16 +127,40 @@ class CameraController(private val context: Context, private val renderer: Camer
     fun bind(owner: LifecycleOwner, flashMode: Int, onBound: () -> Unit = {}) {
         val p = provider ?: return
         val photo = mode == Mode.PHOTO
+        val selector = CameraSelector.Builder().requireLensFacing(lensFacing).build()
+        val info = try { p.getCameraInfo(selector) } catch (t: Throwable) { null }
+        caps = info?.let { readCaps(it) }
+        val c = caps
+        val fmt = if (photo) null else (videoFormat?.let { v -> c?.videoFormats?.firstOrNull { it.w == v.w && it.h == v.h && it.fps == v.fps } }
+            ?: c?.videoFormats?.firstOrNull { it.h == 1080 && it.fps == 30 })
         val ratio = if (photo) AspectRatio.RATIO_4_3 else AspectRatio.RATIO_16_9
-        val previewTarget = if (photo) Size(1440, 1080) else Size(1920, 1080)
+        val previewTarget = if (photo) Size(1440, 1080) else Size(fmt?.w ?: 1920, fmt?.h ?: 1080)
         val previewSelector = ResolutionSelector.Builder()
             .setAspectRatioStrategy(AspectRatioStrategy(ratio, AspectRatioStrategy.FALLBACK_RULE_AUTO))
-            .setResolutionStrategy(ResolutionStrategy(previewTarget, ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER))
+            .setResolutionStrategy(ResolutionStrategy(previewTarget,
+                if (photo) ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER else ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER))
             .build()
         val previewBuilder = Preview.Builder()
             .setResolutionSelector(previewSelector)
             .setTargetRotation(Surface.ROTATION_0)
-        Camera2Interop.Extender(previewBuilder).setSessionCaptureCallback(captureCallback)
+        val ext = Camera2Interop.Extender(previewBuilder)
+        ext.setSessionCaptureCallback(captureCallback)
+        stabActive = Stab.OFF
+        if (fmt != null) previewBuilder.setTargetFrameRate(fmt.fpsRange)
+        if (!photo && stabRequested && c != null) {
+            when {
+                c.previewStab -> { previewBuilder.setPreviewStabilizationEnabled(true); stabActive = Stab.PREVIEW }
+                c.eis -> {
+                    ext.setCaptureRequestOption(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON)
+                    stabActive = Stab.VIDEO_EIS
+                }
+                c.ois -> stabActive = Stab.OIS_ONLY
+            }
+        }
+        if (c?.ois == true && (photo || stabRequested)) {
+            ext.setCaptureRequestOption(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON)
+        }
+        boundFormat = fmt
         val preview = previewBuilder.build()
         preview.setSurfaceProvider(renderer.executor) { request ->
             val res = request.resolution
@@ -117,10 +171,6 @@ class CameraController(private val context: Context, private val renderer: Camer
             val surface = Surface(st)
             request.provideSurface(surface, renderer.executor) { surface.release() }
         }
-
-        val selector = CameraSelector.Builder().requireLensFacing(lensFacing).build()
-        val info = try { p.getCameraInfo(selector) } catch (t: Throwable) { null }
-        caps = info?.let { readCaps(it) }
 
         val useCases = mutableListOf<androidx.camera.core.UseCase>(preview)
         imageCapture = null
@@ -156,6 +206,14 @@ class CameraController(private val context: Context, private val renderer: Camer
             onBound()
         } catch (t: Throwable) {
             Log.e(tag, "bind failed", t)
+            if (!photo && (fmt != null && (fmt.fps != 30 || fmt.h != 1080) || stabActive != Stab.OFF)) {
+                // fall back to plain 1080p30 without stabilisation
+                onBindFallback?.invoke()
+                videoFormat = c?.videoFormats?.firstOrNull { it.h == 1080 && it.fps == 30 }
+                stabRequested = false
+                bind(owner, flashMode, onBound)
+                return
+            }
             if (photo) {
                 try {
                     p.unbindAll()
@@ -170,6 +228,30 @@ class CameraController(private val context: Context, private val renderer: Camer
         }
     }
 
+    /** Called when the requested video format could not be bound and 1080p30 is used instead. */
+    var onBindFallback: (() -> Unit)? = null
+
+    private fun videoFormats(c2: Camera2CameraInfo): List<VideoFormat> {
+        val map = c2.getCameraCharacteristic(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return emptyList()
+        val sizes = map.getOutputSizes(android.graphics.SurfaceTexture::class.java)?.toList() ?: emptyList()
+        val ranges = c2.getCameraCharacteristic(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)?.toList() ?: emptyList()
+        val out = ArrayList<VideoFormat>()
+        for ((w, h) in listOf(1920 to 1080, 3840 to 2160)) {
+            val size = sizes.firstOrNull { it.width == w && it.height == h } ?: continue
+            val minDur = try { map.getOutputMinFrameDuration(android.graphics.SurfaceTexture::class.java, size) } catch (_: Throwable) { 0L }
+            for (fps in listOf(30, 60)) {
+                if (minDur > 0 && minDur > 1_000_000_000L / fps + 500_000L) continue
+                val range = ranges.firstOrNull { it.lower == fps && it.upper == fps }
+                    ?: ranges.filter { it.upper == fps }.maxByOrNull { it.lower }
+                    ?: if (fps == 30) Range(30, 30) else continue
+                if (com.hq.retrocam.record.Encoders.choose(w, h, fps) == null) continue
+                out += VideoFormat(w, h, fps, range)
+            }
+        }
+        if (out.none { it.h == 1080 && it.fps == 30 }) out.add(0, VideoFormat(1920, 1080, 30, Range(30, 30)))
+        return out
+    }
+
     private fun readCaps(info: androidx.camera.core.CameraInfo): CameraCaps {
         val c2 = Camera2CameraInfo.from(info)
         val iso = c2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
@@ -182,7 +264,18 @@ class CameraController(private val context: Context, private val renderer: Camer
         val raw = try {
             ImageCapture.getImageCaptureCapabilities(info).supportedOutputFormats.contains(ImageCapture.OUTPUT_FORMAT_RAW)
         } catch (t: Throwable) { false }
+        val tmModes = c2.getCameraCharacteristic(CameraCharacteristics.TONEMAP_AVAILABLE_TONE_MAP_MODES) ?: IntArray(0)
+        val maxPts = c2.getCameraCharacteristic(CameraCharacteristics.TONEMAP_MAX_CURVE_POINTS) ?: 0
+        val stabModes = c2.getCameraCharacteristic(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES) ?: IntArray(0)
+        val oisModes = c2.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION) ?: IntArray(0)
+        val previewStab = try { Preview.getPreviewCapabilities(info).isStabilizationSupported } catch (_: Throwable) { false }
         return CameraCaps(
+            tonemapCurve = tmModes.contains(CaptureRequest.TONEMAP_MODE_CONTRAST_CURVE) && maxPts >= 16,
+            maxCurvePoints = maxPts,
+            videoFormats = try { videoFormats(c2) } catch (t: Throwable) { Log.w(tag, "formats", t); listOf(VideoFormat(1920, 1080, 30, Range(30, 30))) },
+            previewStab = previewStab,
+            eis = stabModes.contains(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON),
+            ois = oisModes.contains(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON),
             isoRange = if (manualSensor) iso else null,
             exposureRange = if (manualSensor) exp else null,
             minFocusDiopters = if (manualSensor) minFocus else 0f,
@@ -204,7 +297,8 @@ class CameraController(private val context: Context, private val renderer: Camer
             b.setCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
             b.setCaptureRequestOption(CaptureRequest.SENSOR_SENSITIVITY, iso)
             b.setCaptureRequestOption(CaptureRequest.SENSOR_EXPOSURE_TIME, exp)
-            b.setCaptureRequestOption(CaptureRequest.SENSOR_FRAME_DURATION, maxOf(exp, 33_333_333L))
+            val frame = 1_000_000_000L / (boundFormat?.fps ?: 30)
+            b.setCaptureRequestOption(CaptureRequest.SENSOR_FRAME_DURATION, maxOf(exp, frame))
         }
         if (m.awbMode != CaptureRequest.CONTROL_AWB_MODE_AUTO) {
             b.setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, m.awbMode)
@@ -213,10 +307,27 @@ class CameraController(private val context: Context, private val renderer: Camer
             b.setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
             b.setCaptureRequestOption(CaptureRequest.LENS_FOCUS_DISTANCE, it)
         }
+        val autoExposure = m.iso == null && m.exposureNs == null
+        var logIdx = 0
+        if (logHardware) {
+            val pts = minOf(caps?.maxCurvePoints ?: 32, 64).coerceAtLeast(16)
+            val curve = FloatArray(pts * 2)
+            val k = 64.0
+            for (i in 0 until pts) {
+                val x = (i.toDouble() / (pts - 1)).let { it * it }
+                curve[i * 2] = x.toFloat()
+                curve[i * 2 + 1] = (Math.log(x * k + 1.0) / Math.log(k + 1.0)).toFloat()
+            }
+            b.setCaptureRequestOption(CaptureRequest.TONEMAP_MODE, CaptureRequest.TONEMAP_MODE_CONTRAST_CURVE)
+            b.setCaptureRequestOption(CaptureRequest.TONEMAP_CURVE, android.hardware.camera2.params.TonemapCurve(curve, curve, curve))
+            val step = caps?.evStep ?: 0f
+            if (autoExposure && step > 0f) logIdx = -Math.round(1.5f / step)
+        }
         try {
             Camera2CameraControl.from(cam.cameraControl).setCaptureRequestOptions(b.build())
             val r = caps?.evRange
-            val ev = if (r != null) m.evIndex.coerceIn(r.lower, r.upper) else 0
+            val ev = if (r != null) (m.evIndex + logIdx).coerceIn(r.lower, r.upper) else 0
+            logEvOffset = if (logHardware && autoExposure) (ev - m.evIndex.coerceIn(r?.lower ?: 0, r?.upper ?: 0)) * (caps?.evStep ?: 0f) else 0f
             cam.cameraControl.setExposureCompensationIndex(ev)
         } catch (t: Throwable) {
             Log.w(tag, "applyManual", t)

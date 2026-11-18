@@ -6,22 +6,58 @@ object Shaders {
 in vec4 aPos;
 in vec2 aUv;
 uniform float uFlipY;
+uniform mat2 uPosRot;
 out vec2 vUv;
 void main() {
     vUv = aUv;
-    gl_Position = vec4(aPos.x, aPos.y * uFlipY, 0.0, 1.0);
+    gl_Position = vec4(uPosRot * vec2(aPos.x, aPos.y * uFlipY), 0.0, 1.0);
 }
 """
 
     private const val HEADER_OES = """#version 300 es
 #extension GL_OES_EGL_image_external_essl3 : require
 precision highp float;
+precision mediump sampler3D;
 uniform samplerExternalOES uTex;
 """
 
     private const val HEADER_2D = """#version 300 es
 precision highp float;
+precision mediump sampler3D;
 uniform sampler2D uTex;
+"""
+
+
+    /** Log decode/encode + 3D LUT. Needs uTex declared by the header. */
+    private const val COLOR = """
+uniform mat4 uTexMatrix;
+uniform sampler3D uLut;
+uniform float uLutMix;
+uniform float uLutSize;
+uniform vec3 uLutMin;
+uniform vec3 uLutMax;
+uniform int uLogIn;      // 0 standard, 1 camera log curve, 2 simulated log
+uniform int uLogDecode;  // 1 = built-in log -> display conversion
+uniform float uLogGain;  // undoes the log under-exposure
+
+const float LOGK = 64.0;
+vec3 logEncode(vec3 lin) { return log2(max(lin, 0.0) * LOGK + 1.0) / log2(LOGK + 1.0); }
+vec3 logDecode(vec3 v) { return (exp2(clamp(v, 0.0, 1.0) * log2(LOGK + 1.0)) - 1.0) / LOGK; }
+vec3 shoulder(vec3 x) { return mix(x, 0.8 + 0.2 * (1.0 - exp(-(x - 0.8) / 0.2)), step(0.8, x)); }
+
+vec3 colorIn(vec3 c) {
+    if (uLogIn == 1) {
+        if (uLogDecode == 1) c = pow(clamp(shoulder(logDecode(c) * uLogGain), 0.0, 1.0), vec3(1.0 / 2.2));
+    } else if (uLogIn == 2) {
+        if (uLogDecode == 0) c = logEncode(pow(max(c, 0.0), vec3(2.2)) / uLogGain);
+    }
+    if (uLutMix > 0.0) {
+        vec3 u = clamp((c - uLutMin) / (uLutMax - uLutMin), 0.0, 1.0);
+        u = u * ((uLutSize - 1.0) / uLutSize) + 0.5 / uLutSize;
+        c = mix(c, texture(uLut, u).rgb, uLutMix);
+    }
+    return c;
+}
 """
 
     /**
@@ -31,7 +67,6 @@ uniform sampler2D uTex;
     private const val BODY = """
 in vec2 vUv;
 out vec4 fragColor;
-uniform mat4 uTexMatrix;
 uniform int uStyle;
 uniform float uIntensity;
 uniform float uGrain;
@@ -46,7 +81,7 @@ uniform vec2 uTexel;     // one source pixel in output uv
 
 vec3 src(vec2 uv) {
     uv = uCrop.xy + clamp(uv, vec2(0.001), vec2(0.999)) * uCrop.zw;
-    return texture(uTex, (uTexMatrix * vec4(uv, 0.0, 1.0)).xy).rgb;
+    return colorIn(texture(uTex, (uTexMatrix * vec4(uv, 0.0, 1.0)).xy).rgb);
 }
 
 float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
@@ -290,8 +325,17 @@ void main() {
 }
 """
 
-    const val FRAGMENT_OES = HEADER_OES + BODY
-    const val FRAGMENT_2D = HEADER_2D + BODY
+    const val FRAGMENT_OES = HEADER_OES + COLOR + BODY
+    const val FRAGMENT_2D = HEADER_2D + COLOR + BODY
+
+    /** Camera frame -> colour-converted upright content (pre-pass for the look). */
+    const val COLOR_FRAGMENT_OES = HEADER_OES + COLOR + """
+in vec2 vUv;
+out vec4 fragColor;
+void main() {
+    fragColor = vec4(clamp(colorIn(texture(uTex, (uTexMatrix * vec4(vUv, 0.0, 1.0)).xy).rgb), 0.0, 1.0), 1.0);
+}
+"""
 
     const val OVERLAY_FRAGMENT = """#version 300 es
 precision mediump float;

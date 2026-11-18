@@ -49,6 +49,12 @@ import com.hq.retrocam.databinding.ActivityMainBinding
 import com.hq.retrocam.gl.CameraRenderer
 import com.hq.retrocam.gl.LookParams
 import com.hq.retrocam.gl.Styles
+import com.hq.retrocam.gl.ColorState
+import com.hq.retrocam.gl.LutLibrary
+import com.hq.retrocam.camera.Stab
+import com.hq.retrocam.camera.VideoFormat
+import com.hq.retrocam.record.Encoders
+import android.media.MediaFormat
 import com.hq.retrocam.record.VideoRecorder
 import com.hq.retrocam.util.MediaSaver
 import java.io.File
@@ -90,12 +96,37 @@ class MainActivity : AppCompatActivity() {
     private var photoRatioIdx = 0
     private var videoRatioIdx = 0
     private var assistOpen = false
+    private var stabPref = true
+    private var fmtPref: VideoFormat? = null
     private var gridOn = false
     private var levelOn = false
     private var histOn = false
     private var peakOn = false
     private var zebraOn = false
-    private var proTab = false
+    /** Bottom tab: 0 effects, 1 pro, 2 colour. */
+    private var tab = 0
+    private val proTab get() = tab == 1
+
+    // Phase 3
+    private val lutLib by lazy { LutLibrary(this) }
+    private var lutId: String? = null
+    private var lutStrength = 100
+    private var profileLog = false
+    private var convertOn = true
+    private var burnIn = true
+    private val lutViews = ArrayList<Pair<String?, TextView>>()
+    private val importLut = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) return@registerForActivityResult
+        showToast("正在导入 LUT…")
+        io.execute {
+            try {
+                val e = lutLib.import(uri)
+                main.post { buildLutStrip(); selectLut(e.id); showToast("已导入 ${e.name}") }
+            } catch (t: Throwable) {
+                main.post { showToast("导入失败: ${t.message}") }
+            }
+        }
+    }
     private var activeParam: ProParam? = null
     private var sliderOpts: List<Opt<*>> = emptyList()
     private var sliderBusy = false
@@ -128,6 +159,8 @@ class MainActivity : AppCompatActivity() {
         loadPrefs()
         renderer = CameraRenderer(params)
         cam = CameraController(this, renderer)
+        cam.stabRequested = stabPref
+        cam.videoFormat = fmtPref
         renderer.start { main.post { rendererReady = true; maybeBind() } }
         cam.init { providerReady = true; maybeBind() }
 
@@ -149,6 +182,8 @@ class MainActivity : AppCompatActivity() {
         setupControls()
         setupAssist()
         setupPro()
+        setupColor()
+        cam.onBindFallback = { main.post { showToast("这个格式/防抖组合不支持，已回退 1080p 30") } }
         main.post(uiTicker)
         setupGestures()
         refreshUi()
@@ -209,6 +244,7 @@ class MainActivity : AppCompatActivity() {
             cam.imageCapture?.targetRotation = surfaceRotation(orientation)
             if (cam.mode == Mode.VIDEO) cam.setTorch(false)
             if (activeParam != null) openSlider(activeParam!!)
+            applyColor()
             refreshPro()
             refreshUi()
         }
@@ -286,6 +322,7 @@ class MainActivity : AppCompatActivity() {
         if (m == Mode.VIDEO && flashIdx == 2) flashIdx = 0
         if (m == Mode.VIDEO && (cam.manual.exposureNs ?: 0L) > 33_333_333L) cam.manual.exposureNs = null
         applyRatio()
+        applyColor()
         refreshUi()
         maybeBind()
     }
@@ -300,7 +337,26 @@ class MainActivity : AppCompatActivity() {
         b.btnTimer.text = if (timers[timerIdx] == 0) "定时 关" else "定时 ${timers[timerIdx]}s"
         b.btnFlash.text = when (flashIdx) { 1 -> "闪光 开"; 2 -> "闪光 自动"; else -> "闪光 关" }
         val photo = cam.mode == Mode.PHOTO
-        b.btnRatio.text = if (photo) photoRatios[photoRatioIdx].label + (if (cam.rawActive) " RAW" else "") else videoRatios[videoRatioIdx].label + " · 1080p"
+        b.btnRatio.text = if (photo) photoRatios[photoRatioIdx].label + (if (cam.rawActive) " RAW" else "") else videoRatios[videoRatioIdx].label
+        b.btnFormat.visibility = if (photo) View.GONE else View.VISIBLE
+        b.btnFormat.text = (cam.boundFormat ?: cam.videoFormat)?.label ?: "1080p 30"
+        b.asStab.alpha = if (photo) 0.4f else 1f
+        b.asStab.isSelected = !photo && cam.stabRequested
+        b.asStab.text = if (cam.stabRequested) "防抖 开" else "防抖 关"
+        b.colorPanel.visibility = if (tab == 2) View.VISIBLE else View.GONE
+        b.tabColor.setTextColor(if (tab == 2) 0xFFFFB547.toInt() else 0x99FFFFFF.toInt())
+        for (v in listOf(b.colLog, b.colConvert, b.colBurn)) v.visibility = if (photo) View.GONE else View.VISIBLE
+        b.colConvert.visibility = if (!photo && profileLog) View.VISIBLE else View.GONE
+        b.colLog.isSelected = profileLog
+        b.colLog.text = if (!profileLog) "Log 关" else if (cam.logHardware) "Log 开" else "Log 开(模拟)"
+        b.colConvert.isSelected = convertOn
+        b.colConvert.text = if (convertOn) "内置转换 开" else "内置转换 关"
+        b.colBurn.isSelected = burnIn
+        b.colBurn.text = if (burnIn) "烧录 开" else "烧录 关(录原始)"
+        for ((id, v) in lutViews) v.isSelected = id == lutId
+        b.lutLabel.text = "LUT ${lutStrength}%"
+        b.lutSeek.isEnabled = lutId != null
+        b.lutSeek.alpha = if (lutId != null) 1f else 0.4f
         b.assistPanel.visibility = if (assistOpen) View.VISIBLE else View.GONE
         b.btnAssist.text = if (assistOpen) "辅助 ▴" else "辅助 ▾"
         b.asGrid.isSelected = gridOn
@@ -316,9 +372,9 @@ class MainActivity : AppCompatActivity() {
         renderer.peaking = peakOn
         renderer.zebra = zebraOn
         renderer.histogram = histOn
-        b.tabFx.setTextColor(if (!proTab) 0xFFFFB547.toInt() else 0x99FFFFFF.toInt())
+        b.tabFx.setTextColor(if (tab == 0) 0xFFFFB547.toInt() else 0x99FFFFFF.toInt())
         b.tabPro.setTextColor(if (proTab) 0xFFFFB547.toInt() else 0x99FFFFFF.toInt())
-        b.fxRow.visibility = if (proTab) View.GONE else View.VISIBLE
+        b.fxRow.visibility = if (tab == 0) View.VISIBLE else View.GONE
         b.proRow.visibility = if (proTab) View.VISIBLE else View.GONE
         b.sliderRow.visibility = if (proTab && activeParam != null) View.VISIBLE else View.GONE
         b.modePhoto.setTextColor(if (photo) 0xFFFFB547.toInt() else 0x99FFFFFF.toInt())
@@ -498,13 +554,18 @@ class MainActivity : AppCompatActivity() {
 
     private fun startRecording() {
         if (recorder != null) return
-        val w = renderer.contentW / 16 * 16
-        val h = renderer.contentH / 16 * 16
+        // landscape encoder frame; the renderer rotates the portrait content into it
+        val w = maxOf(renderer.contentW, renderer.contentH) / 8 * 8
+        val h = minOf(renderer.contentW, renderer.contentH) / 8 * 8
+        val fps = cam.boundFormat?.fps ?: 30
         val file = File(cacheDir, "rec_${System.currentTimeMillis()}.mp4")
         val withAudio = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-        val bitrate = (w * h * 30 * 0.33).toInt().coerceIn(8_000_000, 40_000_000)
+        val enc = Encoders.choose(w, h, fps) ?: Encoders.Choice(MediaFormat.MIMETYPE_VIDEO_AVC, (w * h * fps * 0.2).toInt().coerceIn(16_000_000, 100_000_000))
+        val hint = (orientation + 270) % 360
+        b.audioMeter.reset()
         val rec = try {
-            VideoRecorder(file, w, h, bitrate, 30, orientation, withAudio) { f, err ->
+            VideoRecorder(file, w, h, enc.bitrate, fps, hint, withAudio, enc.mime,
+                onLevel = { l, r -> main.post { b.audioMeter.setLevels(l, r) } }) { f, err ->
                 if (f == null) main.post { showToast("录像失败: ${err?.message}") } else onVideoFinished(f)
             }
         } catch (t: Throwable) {
@@ -591,6 +652,34 @@ class MainActivity : AppCompatActivity() {
         b.asHist.setOnClickListener { histOn = !histOn; refreshUi(); savePrefs() }
         b.asPeak.setOnClickListener { peakOn = !peakOn; refreshUi(); savePrefs() }
         b.asZebra.setOnClickListener { zebraOn = !zebraOn; refreshUi(); savePrefs() }
+        b.btnFormat.setOnClickListener {
+            if (recorder != null || cam.mode != Mode.VIDEO) return@setOnClickListener
+            val list = cam.caps?.videoFormats ?: return@setOnClickListener
+            if (list.size <= 1) { showToast("这颗镜头只支持 1080p 30"); return@setOnClickListener }
+            val cur = cam.boundFormat ?: cam.videoFormat
+            val i = list.indexOfFirst { it.w == cur?.w && it.h == cur?.h && it.fps == cur?.fps }
+            val next = list[(i + 1) % list.size]
+            cam.videoFormat = next
+            val codec = Encoders.choose(next.w, next.h, next.fps)
+            showToast(next.label + (codec?.let { " · " + it.label + " " + it.bitrate / 1_000_000 + " Mbps" } ?: ""))
+            savePrefs()
+            maybeBind()
+        }
+        b.asStab.setOnClickListener {
+            if (cam.mode != Mode.VIDEO) { showToast("防抖用于录像模式"); return@setOnClickListener }
+            if (recorder != null) return@setOnClickListener
+            cam.stabRequested = !cam.stabRequested
+            savePrefs()
+            maybeBind()
+            main.postDelayed({
+                showToast(when (cam.stabActive) {
+                    Stab.PREVIEW -> "防抖 开（预览级电子防抖）"
+                    Stab.VIDEO_EIS -> "防抖 开（电子防抖）"
+                    Stab.OIS_ONLY -> "仅光学防抖，这颗镜头没有电子防抖"
+                    Stab.OFF -> if (cam.stabRequested) "这颗镜头不支持防抖" else "防抖 关"
+                })
+            }, 400)
+        }
         b.asRaw.setOnClickListener {
             if (cam.mode != Mode.PHOTO) { showToast("RAW 仅拍照模式可用"); return@setOnClickListener }
             if (cam.caps?.rawSupported != true) { showToast("这颗镜头不支持 RAW"); return@setOnClickListener }
@@ -601,8 +690,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupPro() {
-        b.tabFx.setOnClickListener { proTab = false; refreshUi() }
-        b.tabPro.setOnClickListener { proTab = true; refreshPro(); refreshUi() }
+        b.tabFx.setOnClickListener { tab = 0; refreshUi() }
+        b.tabPro.setOnClickListener { tab = 1; refreshPro(); refreshUi() }
         val map = mapOf(b.proIso to ProParam.ISO, b.proShutter to ProParam.SHUTTER, b.proEv to ProParam.EV, b.proWb to ProParam.WB, b.proFocus to ProParam.FOCUS)
         for ((v, p) in map) v.setOnClickListener {
             if (activeParam == p) { activeParam = null } else openSlider(p)
@@ -705,6 +794,110 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ---------------- Phase 3: colour / LUT ----------------
+
+    private fun setupColor() {
+        b.tabColor.setOnClickListener { tab = 2; refreshUi() }
+        b.colLog.setOnClickListener {
+            if (recorder != null) return@setOnClickListener
+            profileLog = !profileLog
+            cam.logRequested = profileLog
+            cam.applyManual()
+            applyColor(); refreshUi(); savePrefs()
+            if (profileLog) showToast(if (cam.logHardware) "Log 开：相机输出平坦曲线，曝光自动降 1.5 档" else "Log 开：这颗镜头不能改色调曲线，用软件模拟")
+        }
+        b.colConvert.setOnClickListener {
+            convertOn = !convertOn
+            applyColor(); refreshUi(); savePrefs()
+            showToast(if (convertOn) "预览显示转换后的画面" else "显示原始 Log（选中的 LUT 直接套在 Log 上）")
+        }
+        b.colBurn.setOnClickListener {
+            if (recorder != null) return@setOnClickListener
+            burnIn = !burnIn
+            applyColor(); refreshUi(); savePrefs()
+            showToast(if (burnIn) "烧录开：视频带上 LUT 和风格" else "烧录关：视频只录原始画面（Log 不转换），预览照常")
+        }
+        b.lutSeek.progress = lutStrength
+        b.lutSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar, progress: Int, fromUser: Boolean) {
+                if (!fromUser) return
+                lutStrength = progress
+                applyColor()
+                b.lutLabel.text = "LUT ${lutStrength}%"
+            }
+            override fun onStartTrackingTouch(sb: SeekBar) {}
+            override fun onStopTrackingTouch(sb: SeekBar) { savePrefs() }
+        })
+        cam.logRequested = profileLog
+        buildLutStrip()
+        lutId?.let { id -> if (lutLib.entries().none { it.id == id }) lutId = null else loadLut(id) }
+    }
+
+    private fun lutChip(label: String, id: String?, onClick: () -> Unit): TextView = TextView(this).apply {
+        text = label
+        setTextColor(0xFFFFFFFF.toInt())
+        textSize = 13f
+        gravity = android.view.Gravity.CENTER
+        setBackgroundResource(R.drawable.chip_bg)
+        setPadding(dp(14f), 0, dp(14f), 0)
+        layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(30f)).apply { marginEnd = dp(8f) }
+        setOnClickListener { onClick() }
+        lutViews += Pair(id, this)
+    }
+
+    private fun buildLutStrip() {
+        b.lutStrip.removeAllViews()
+        lutViews.clear()
+        b.lutStrip.addView(lutChip("无 LUT", null) { selectLut(null) })
+        for (e in lutLib.entries()) {
+            val v = lutChip(e.name, e.id) { selectLut(e.id) }
+            if (!e.builtin) v.setOnLongClickListener {
+                androidx.appcompat.app.AlertDialog.Builder(this)
+                    .setTitle("删除 LUT")
+                    .setMessage("删除「${e.name}」？")
+                    .setPositiveButton("删除") { _, _ ->
+                        lutLib.delete(e.id)
+                        if (lutId == e.id) selectLut(null)
+                        buildLutStrip(); refreshUi()
+                    }
+                    .setNegativeButton("取消", null)
+                    .show()
+                true
+            }
+            b.lutStrip.addView(v)
+        }
+        val add = lutChip("＋ 导入 .cube", "__import__") { importLut.launch(arrayOf("*/*")) }
+        add.setTextColor(0xFFFFB547.toInt())
+        b.lutStrip.addView(add)
+        refreshUi()
+    }
+
+    private fun selectLut(id: String?) {
+        lutId = id
+        if (id == null) { renderer.setLut(null); applyColor(); refreshUi(); savePrefs(); return }
+        loadLut(id)
+        refreshUi(); savePrefs()
+    }
+
+    private fun loadLut(id: String) {
+        io.execute {
+            val lut = try { lutLib.load(id) } catch (t: Throwable) { main.post { showToast("LUT 读取失败: ${t.message}") }; null }
+            if (lut == null) { main.post { if (lutId == id) { lutId = null; applyColor(); refreshUi() } }; return@execute }
+            renderer.setLut(lut)
+            main.post { if (lutId == id) { applyColor(); showToast("LUT：${lut.name}（${lut.size}³）") } }
+        }
+    }
+
+    private fun applyColor() {
+        val video = cam.mode == Mode.VIDEO
+        val logIn = if (video && profileLog) (if (cam.logHardware) 1 else 2) else 0
+        val gain = if (logIn == 1) Math.pow(2.0, -cam.logEvOffset.toDouble()).toFloat() else ColorState.LOG_GAIN
+        val mix = if (lutId != null) lutStrength / 100f else 0f
+        renderer.color = ColorState(logIn, convertOn, mix, gain)
+        renderer.cleanColor = ColorState(logIn, false, 0f, gain)
+        renderer.cleanRecord = video && !burnIn
+    }
+
     // ---------------- prefs ----------------
 
     private fun loadPrefs() {
@@ -722,6 +915,14 @@ class MainActivity : AppCompatActivity() {
         peakOn = prefs.getBoolean("peak", false)
         zebraOn = prefs.getBoolean("zebra", false)
         params.stampKind = Styles.all.first { it.id == params.style }.stamp
+        lutId = prefs.getString("lut", null)
+        lutStrength = prefs.getInt("lutStrength", 100).coerceIn(0, 100)
+        profileLog = prefs.getBoolean("log", false)
+        convertOn = prefs.getBoolean("convert", true)
+        burnIn = prefs.getBoolean("burn", true)
+        stabPref = prefs.getBoolean("stab", true)
+        val vf = prefs.getString("vfmt", null)?.split(",")?.mapNotNull { it.toIntOrNull() }
+        if (vf != null && vf.size == 3) fmtPref = VideoFormat(vf[0], vf[1], vf[2], android.util.Range(vf[2], vf[2]))
         applyFx()
     }
 
@@ -740,6 +941,13 @@ class MainActivity : AppCompatActivity() {
             .putBoolean("hist", histOn)
             .putBoolean("peak", peakOn)
             .putBoolean("zebra", zebraOn)
+            .putString("lut", lutId)
+            .putInt("lutStrength", lutStrength)
+            .putBoolean("log", profileLog)
+            .putBoolean("convert", convertOn)
+            .putBoolean("burn", burnIn)
+            .putBoolean("stab", cam.stabRequested)
+            .putString("vfmt", cam.videoFormat?.let { "${it.w},${it.h},${it.fps}" })
             .apply()
     }
 }

@@ -28,7 +28,60 @@ class CameraRenderer(private val params: LookParams) {
     private lateinit var pbuffer: EGLSurface
     private lateinit var oesProgram: LookProgram
     private var stillProgram: LookProgram? = null
+    private lateinit var look2d: LookProgram
+    private lateinit var colorProgram: ColorProgram
     private lateinit var overlay: OverlayProgram
+    private val lutTex = LutTexture()
+    private var preFbo = 0
+    private var preTex = 0
+    private var preW = 0
+    private var preH = 0
+    private val identity = FloatArray(16).also { android.opengl.Matrix.setIdentityM(it, 0) }
+    private val cleanParams = LookParams().apply { style = 0; intensity = 0f; grain = 0f; vignette = 0f; leak = 0f; dateStamp = false }
+
+    /** Colour conversion for preview / burned-in output. */
+    @Volatile var color: ColorState = ColorState.NONE
+    /** When true the encoder gets the clean camera image (no LUT, look, grain or stamp). */
+    @Volatile var cleanRecord = false
+    /** Colour state for the clean recording (log kept, no LUT). */
+    @Volatile var cleanColor: ColorState = ColorState.NONE
+    /** Name of the LUT now on the GPU, for UI checks. */
+    @Volatile var lutName: String? = null
+        private set
+
+    fun setLut(lut: CubeLut?) = handler.post {
+        try {
+            egl.makeCurrent(pbuffer)
+            lutTex.upload(lut)
+            lutName = lutTex.name
+        } catch (t: Throwable) { Log.e(tag, "lut upload", t); lutName = null }
+    }
+
+    private fun prePass(cs: ColorState) {
+        val w = contentW; val h = contentH
+        if (preFbo == 0 || preW != w || preH != h) {
+            if (preTex == 0) preTex = Gl.createTexture2D(null)
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, preTex)
+            GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA, w, h, 0, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, null)
+            if (preFbo == 0) { val f = IntArray(1); GLES30.glGenFramebuffers(1, f, 0); preFbo = f[0] }
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, preFbo)
+            GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0, GLES30.GL_TEXTURE_2D, preTex, 0)
+            preW = w; preH = h
+        }
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, preFbo)
+        GLES30.glViewport(0, 0, w, h)
+        colorProgram.draw(oesTex, texMatrix, cs, lutTex)
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+    }
+
+    private var usePre = false
+
+    /** Draws the look for the current frame into the current viewport. */
+    private fun drawLook(time: Float, aspect: Float, crop: FloatArray, peaking: Boolean = false, zebra: Boolean = false, texelX: Float = 0.001f, texelY: Float = 0.001f) {
+        if (usePre) look2d.draw(preTex, identity, params, time, aspect, crop = crop, peaking = peaking, zebra = zebra, texelX = texelX, texelY = texelY)
+        else oesProgram.draw(oesTex, texMatrix, params, time, aspect, crop = crop, peaking = peaking, zebra = zebra, texelX = texelX, texelY = texelY,
+            colorState = color, lut = lutTex)
+    }
     private var oesTex = 0
     lateinit var surfaceTexture: SurfaceTexture
         private set
@@ -94,7 +147,7 @@ class CameraRenderer(private val params: LookParams) {
         }
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, histFbo)
         GLES30.glViewport(0, 0, histW, histH)
-        oesProgram.draw(oesTex, texMatrix, params, time, aspect, crop = crop)
+        drawLook(time, aspect, crop)
         histBuf.clear()
         GLES30.glReadPixels(0, 0, histW, histH, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, histBuf)
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
@@ -122,6 +175,8 @@ class CameraRenderer(private val params: LookParams) {
             pbuffer = egl.createPbuffer(1, 1)
             egl.makeCurrent(pbuffer)
             oesProgram = LookProgram(true)
+            look2d = LookProgram(false)
+            colorProgram = ColorProgram()
             overlay = OverlayProgram()
             oesTex = Gl.createOesTexture()
             surfaceTexture = SurfaceTexture(oesTex)
@@ -186,6 +241,13 @@ class CameraRenderer(private val params: LookParams) {
             val aspect = cw / ch
             updateStamp()
             frameCount++
+            Gl.posRot = Gl.IDENTITY_ROT
+            val cs = color
+            usePre = cs.active
+            if (usePre) {
+                egl.makeCurrent(displaySurface ?: encSurface!!)
+                prePass(cs)
+            }
 
             displaySurface?.let { ds ->
                 egl.makeCurrent(ds)
@@ -209,7 +271,7 @@ class CameraRenderer(private val params: LookParams) {
                 val vy = displayH - vyTop - vh
                 previewRect = android.graphics.RectF(vx.toFloat(), vyTop.toFloat(), (vx + vw).toFloat(), (vyTop + vh).toFloat())
                 GLES30.glViewport(vx, vy, vw, vh)
-                oesProgram.draw(oesTex, texMatrix, params, time, aspect, crop = crop, peaking = peaking, zebra = zebra,
+                drawLook(time, aspect, crop, peaking = peaking, zebra = zebra,
                     texelX = 1f / maxOf(1f, cw), texelY = 1f / maxOf(1f, ch))
                 if (params.dateStamp && stampTex != 0) {
                     overlay.drawStamp(stampTex, stampBw, stampBh, cw.toInt(), ch.toInt(), orientation, Stamp.widthFrac(params.stampKind))
@@ -222,14 +284,23 @@ class CameraRenderer(private val params: LookParams) {
                 GLES30.glViewport(0, 0, encW, encH)
                 GLES30.glClearColor(0f, 0f, 0f, 1f)
                 GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
-                val ea = encW.toFloat() / encH
+                // The encoder frame is landscape; upright portrait content is rotated 90 degrees
+                // clockwise into it and the container rotation hint turns it back.
+                val pw = encH; val ph = encW
+                val ea = pw.toFloat() / ph
                 val sw: Int; val sh: Int
-                if (aspect < ea) { sh = encH; sw = (encH * aspect).toInt() } else { sw = encW; sh = (encW / aspect).toInt() }
-                GLES30.glViewport((encW - sw) / 2, (encH - sh) / 2, sw, sh)
-                oesProgram.draw(oesTex, texMatrix, params, time, aspect, crop = crop)
-                if (params.dateStamp && stampTex != 0) {
-                    overlay.drawStamp(stampTex, stampBw, stampBh, sw, sh, recRotation, Stamp.widthFrac(params.stampKind))
+                if (aspect < ea) { sh = ph; sw = (ph * aspect).toInt() } else { sw = pw; sh = (pw / aspect).toInt() }
+                GLES30.glViewport((encW - sh) / 2, (encH - sw) / 2, sh, sw)
+                Gl.posRot = Gl.ROT_CW
+                if (cleanRecord) {
+                    oesProgram.draw(oesTex, texMatrix, cleanParams, time, aspect, crop = crop, colorState = cleanColor, lut = null)
+                } else {
+                    drawLook(time, aspect, crop)
+                    if (params.dateStamp && stampTex != 0) {
+                        overlay.drawStamp(stampTex, stampBw, stampBh, sw, sh, recRotation, Stamp.widthFrac(params.stampKind))
+                    }
                 }
+                Gl.posRot = Gl.IDENTITY_ROT
                 egl.setPresentationTime(es, System.nanoTime())
                 egl.swap(es)
             }
@@ -277,7 +348,8 @@ class CameraRenderer(private val params: LookParams) {
             check(GLES30.glCheckFramebufferStatus(GLES30.GL_FRAMEBUFFER) == GLES30.GL_FRAMEBUFFER_COMPLETE) { "fbo incomplete" }
             GLES30.glViewport(0, 0, w, h)
             val flipV = floatArrayOf(1f, 0f, 0f, 0f, 0f, -1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 1f, 0f, 1f)
-            prog.draw(inTex, flipV, params, 37.5f, w.toFloat() / h, flipY = true)
+            Gl.posRot = Gl.IDENTITY_ROT
+            prog.draw(inTex, flipV, params, 37.5f, w.toFloat() / h, flipY = true, colorState = color.copy(logIn = 0), lut = lutTex)
             if (params.dateStamp) {
                 val kind = params.stampKind
                 val frac = Stamp.widthFrac(kind)

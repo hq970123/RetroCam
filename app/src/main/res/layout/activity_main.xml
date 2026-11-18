@@ -39,6 +39,7 @@
         <TextView android:id="@+id/btnFlash" style="@style/TopBtn" android:text="闪光 关" />
         <TextView android:id="@+id/btnTimer" style="@style/TopBtn" android:text="定时 关" />
         <TextView android:id="@+id/btnRatio" style="@style/TopBtn" android:text="4:3" />
+        <TextView android:id="@+id/btnFormat" style="@style/TopBtn" android:text="1080p 30" android:visibility="gone" />
         <TextView android:id="@+id/btnDate" style="@style/TopBtn" android:text="日期 开" />
         <TextView android:id="@+id/btnAssist" style="@style/TopBtn" android:text="辅助 ▾" />
     </LinearLayout>
@@ -66,6 +67,7 @@
             <TextView android:id="@+id/asPeak" style="@style/FxChip" android:text="峰值对焦" />
             <TextView android:id="@+id/asZebra" style="@style/FxChip" android:text="斑马纹" />
             <TextView android:id="@+id/asRaw" style="@style/FxChip" android:text="RAW" />
+            <TextView android:id="@+id/asStab" style="@style/FxChip" android:text="防抖" />
         </LinearLayout>
     </HorizontalScrollView>
 
@@ -87,6 +89,8 @@
         <View android:id="@+id/recDot" android:layout_width="10dp" android:layout_height="10dp" android:background="@drawable/shutter_video" />
         <TextView android:id="@+id/recTime" android:layout_width="wrap_content" android:layout_height="wrap_content"
             android:layout_marginStart="8dp" android:fontFamily="monospace" android:text="REC 00:00" android:textColor="#FFFFFF" android:textSize="15sp" android:textStyle="bold" />
+        <com.hq.retrocam.ui.AudioMeterView android:id="@+id/audioMeter" android:layout_width="64dp" android:layout_height="12dp"
+            android:layout_marginStart="10dp" />
     </LinearLayout>
 
     <TextView
@@ -149,6 +153,56 @@
             android:paddingTop="10dp">
             <TextView android:id="@+id/tabFx" style="@style/ModeText" android:textSize="13sp" android:text="效果" />
             <TextView android:id="@+id/tabPro" style="@style/ModeText" android:textSize="13sp" android:text="专业" />
+            <TextView android:id="@+id/tabColor" style="@style/ModeText" android:textSize="13sp" android:text="调色" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/colorPanel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone">
+            <HorizontalScrollView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:scrollbars="none">
+                <LinearLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:paddingStart="8dp"
+                    android:paddingEnd="8dp">
+                    <TextView android:id="@+id/colLog" style="@style/FxChip" android:text="Log 关" />
+                    <TextView android:id="@+id/colConvert" style="@style/FxChip" android:text="内置转换 开" />
+                    <TextView android:id="@+id/colBurn" style="@style/FxChip" android:text="烧录 开" />
+                </LinearLayout>
+            </HorizontalScrollView>
+            <HorizontalScrollView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:scrollbars="none">
+                <LinearLayout
+                    android:id="@+id/lutStrip"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:paddingStart="8dp"
+                    android:paddingEnd="8dp" />
+            </HorizontalScrollView>
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingStart="16dp"
+                android:paddingTop="4dp"
+                android:paddingEnd="16dp">
+                <TextView android:id="@+id/lutLabel" android:layout_width="96dp" android:layout_height="wrap_content"
+                    android:text="LUT 100%" android:textColor="#FFB547" android:textSize="13sp" android:textStyle="bold" />
+                <SeekBar android:id="@+id/lutSeek" android:layout_width="0dp" android:layout_height="32dp" android:layout_weight="1" android:max="100" />
+            </LinearLayout>
         </LinearLayout>
 
         <HorizontalScrollView

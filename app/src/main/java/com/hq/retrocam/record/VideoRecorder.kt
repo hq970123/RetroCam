@@ -28,6 +28,9 @@ class VideoRecorder(
     fps: Int,
     orientationHint: Int,
     private val withAudio: Boolean,
+    mime: String = MediaFormat.MIMETYPE_VIDEO_AVC,
+    /** Peak levels per channel (0..1), called on the audio thread ~20 times a second. */
+    private val onLevel: ((Float, Float) -> Unit)? = null,
     private val onFinished: (File?, Throwable?) -> Unit,
 ) {
     private val tag = "RetroCam.Rec"
@@ -54,13 +57,13 @@ class VideoRecorder(
 
     init {
         muxer.setOrientationHint(orientationHint)
-        val fmt = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
+        val fmt = MediaFormat.createVideoFormat(mime, width, height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
         }
-        videoCodec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+        videoCodec = MediaCodec.createEncoderByType(mime)
         videoCodec.setCallback(object : MediaCodec.Callback() {
             override fun onInputBufferAvailable(codec: MediaCodec, index: Int) {}
             override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
@@ -137,13 +140,27 @@ class VideoRecorder(
                     if (inIdx >= 0) {
                         val inBuf = codec.getInputBuffer(inIdx)!!
                         inBuf.clear()
+                        inBuf.order(java.nio.ByteOrder.LITTLE_ENDIAN)
                         val stop = !audioRunning.get()
-                        val read = if (stop) 0 else rec.read(inBuf, minOf(inBuf.capacity(), 8192))
+                        val read = if (stop) 0 else rec.read(inBuf, minOf(inBuf.capacity(), 4096))
                         val pts = startUs + frames * 1_000_000L / rate
                         if (stop) {
                             codec.queueInputBuffer(inIdx, 0, 0, pts, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                             eosQueued = true
                         } else if (read > 0) {
+                            if (onLevel != null) {
+                                var pl = 0; var pr = 0
+                                var i = 0
+                                val step = 2 * channels
+                                while (i + step <= read) {
+                                    val l = kotlin.math.abs(inBuf.getShort(i).toInt())
+                                    val r = if (channels > 1) kotlin.math.abs(inBuf.getShort(i + 2).toInt()) else l
+                                    if (l > pl) pl = l
+                                    if (r > pr) pr = r
+                                    i += step
+                                }
+                                onLevel.invoke(pl / 32768f, pr / 32768f)
+                            }
                             codec.queueInputBuffer(inIdx, 0, read, pts, 0)
                             frames += read / bytesPerFrame
                         } else {

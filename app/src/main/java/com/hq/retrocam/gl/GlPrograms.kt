@@ -67,6 +67,12 @@ object Gl {
         if (id != 0) GLES30.glDeleteTextures(1, intArrayOf(id), 0)
     }
 
+    val IDENTITY_ROT = floatArrayOf(1f, 0f, 0f, 1f)
+    /** Rotates content 90 degrees clockwise inside the viewport (column-major mat2). */
+    val ROT_CW = floatArrayOf(0f, -1f, 1f, 0f)
+    /** Position rotation applied by every program's vertex shader. GL thread only. */
+    var posRot: FloatArray = IDENTITY_ROT
+
     fun checkError(tag: String) {
         val e = GLES30.glGetError()
         if (e != GLES30.GL_NO_ERROR) Log.w("RetroCam", "GL error 0x${Integer.toHexString(e)} at $tag")
@@ -96,9 +102,97 @@ object Quad {
     }
 }
 
+/** The 3D LUT texture currently uploaded, shared by programs on the GL thread. */
+class LutTexture {
+    var tex = 0
+        private set
+    var size = 2f
+    var min = floatArrayOf(0f, 0f, 0f)
+    var max = floatArrayOf(1f, 1f, 1f)
+    var name: String? = null
+
+    fun upload(lut: CubeLut?) {
+        if (lut == null) { name = null; return }
+        if (tex == 0) {
+            val t = IntArray(1); GLES30.glGenTextures(1, t, 0); tex = t[0]
+        }
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_3D, tex)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_3D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_3D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_LINEAR)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_3D, GLES30.GL_TEXTURE_WRAP_S, GLES30.GL_CLAMP_TO_EDGE)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_3D, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO_EDGE)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_3D, GLES30.GL_TEXTURE_WRAP_R, GLES30.GL_CLAMP_TO_EDGE)
+        GLES30.glPixelStorei(GLES30.GL_UNPACK_ALIGNMENT, 1)
+        val n = lut.size
+        GLES30.glTexImage3D(GLES30.GL_TEXTURE_3D, 0, GLES30.GL_RGB16F, n, n, n, 0, GLES30.GL_RGB, GLES30.GL_FLOAT, Gl.floatBuffer(lut.data))
+        GLES30.glPixelStorei(GLES30.GL_UNPACK_ALIGNMENT, 4)
+        Gl.checkError("lut upload")
+        size = n.toFloat(); min = lut.domainMin; max = lut.domainMax; name = lut.name
+    }
+
+    val ready: Boolean get() = tex != 0 && name != null
+}
+
+/** Uniform locations for the shared COLOR block. */
+class ColorUniforms(id: Int) {
+    private val uLut = GLES30.glGetUniformLocation(id, "uLut")
+    private val uLutMix = GLES30.glGetUniformLocation(id, "uLutMix")
+    private val uLutSize = GLES30.glGetUniformLocation(id, "uLutSize")
+    private val uLutMin = GLES30.glGetUniformLocation(id, "uLutMin")
+    private val uLutMax = GLES30.glGetUniformLocation(id, "uLutMax")
+    private val uLogIn = GLES30.glGetUniformLocation(id, "uLogIn")
+    private val uLogDecode = GLES30.glGetUniformLocation(id, "uLogDecode")
+    private val uLogGain = GLES30.glGetUniformLocation(id, "uLogGain")
+    private val uPosRot = GLES30.glGetUniformLocation(id, "uPosRot")
+
+    /** Program must be in use. Binds the LUT on texture unit 1. */
+    fun set(c: ColorState, lut: LutTexture?) {
+        GLES30.glUniformMatrix2fv(uPosRot, 1, false, Gl.posRot, 0)
+        val lutOn = c.lutMix > 0f && lut != null && lut.ready
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE1)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_3D, if (lutOn) lut!!.tex else 0)
+        GLES30.glUniform1i(uLut, 1)
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
+        GLES30.glUniform1f(uLutMix, if (lutOn) c.lutMix else 0f)
+        if (lutOn) {
+            GLES30.glUniform1f(uLutSize, lut!!.size)
+            GLES30.glUniform3f(uLutMin, lut.min[0], lut.min[1], lut.min[2])
+            GLES30.glUniform3f(uLutMax, lut.max[0], lut.max[1], lut.max[2])
+        } else {
+            GLES30.glUniform1f(uLutSize, 2f)
+            GLES30.glUniform3f(uLutMin, 0f, 0f, 0f)
+            GLES30.glUniform3f(uLutMax, 1f, 1f, 1f)
+        }
+        GLES30.glUniform1i(uLogIn, c.logIn)
+        GLES30.glUniform1i(uLogDecode, if (c.decode) 1 else 0)
+        GLES30.glUniform1f(uLogGain, c.logGain)
+    }
+}
+
+/** Camera OES frame -> colour-converted upright content, for the look pass to read as a 2D texture. */
+class ColorProgram {
+    val id = Gl.program(Shaders.VERTEX, Shaders.COLOR_FRAGMENT_OES)
+    private val uTex = GLES30.glGetUniformLocation(id, "uTex")
+    private val uTexMatrix = GLES30.glGetUniformLocation(id, "uTexMatrix")
+    private val uFlipY = GLES30.glGetUniformLocation(id, "uFlipY")
+    private val color = ColorUniforms(id)
+
+    fun draw(oesTex: Int, texMatrix: FloatArray, c: ColorState, lut: LutTexture?) {
+        GLES30.glUseProgram(id)
+        color.set(c, lut)
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
+        GLES30.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, oesTex)
+        GLES30.glUniform1i(uTex, 0)
+        GLES30.glUniformMatrix4fv(uTexMatrix, 1, false, texMatrix, 0)
+        GLES30.glUniform1f(uFlipY, 1f)
+        Quad.draw(Quad.full)
+    }
+}
+
 class LookProgram(oes: Boolean) {
     private val target = if (oes) GLES11Ext.GL_TEXTURE_EXTERNAL_OES else GLES30.GL_TEXTURE_2D
     val id = Gl.program(Shaders.VERTEX, if (oes) Shaders.FRAGMENT_OES else Shaders.FRAGMENT_2D)
+    private val color = ColorUniforms(id)
     private val uTex = GLES30.glGetUniformLocation(id, "uTex")
     private val uTexMatrix = GLES30.glGetUniformLocation(id, "uTexMatrix")
     private val uStyle = GLES30.glGetUniformLocation(id, "uStyle")
@@ -117,8 +211,10 @@ class LookProgram(oes: Boolean) {
     fun draw(
         tex: Int, texMatrix: FloatArray, p: LookParams, time: Float, aspect: Float, flipY: Boolean = false,
         crop: FloatArray = NO_CROP, peaking: Boolean = false, zebra: Boolean = false, texelX: Float = 0.001f, texelY: Float = 0.001f,
+        colorState: ColorState = ColorState.NONE, lut: LutTexture? = null,
     ) {
         GLES30.glUseProgram(id)
+        color.set(colorState, lut)
         GLES30.glUniform4f(uCrop, crop[0], crop[1], crop[2], crop[3])
         GLES30.glUniform1f(uPeaking, if (peaking) 1f else 0f)
         GLES30.glUniform1f(uZebra, if (zebra) 1f else 0f)
@@ -146,6 +242,7 @@ class OverlayProgram {
     val id = Gl.program(Shaders.VERTEX, Shaders.OVERLAY_FRAGMENT)
     private val uTex = GLES30.glGetUniformLocation(id, "uTex")
     private val uFlipY = GLES30.glGetUniformLocation(id, "uFlipY")
+    private val uPosRot = GLES30.glGetUniformLocation(id, "uPosRot")
     private val buf: FloatBuffer = ByteBuffer.allocateDirect(16 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
 
     /**
@@ -193,6 +290,7 @@ class OverlayProgram {
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, tex)
         GLES30.glUniform1i(uTex, 0)
         GLES30.glUniform1f(uFlipY, if (flipY) -1f else 1f)
+        GLES30.glUniformMatrix2fv(uPosRot, 1, false, Gl.posRot, 0)
         Quad.draw(buf)
         GLES30.glDisable(GLES30.GL_BLEND)
     }
