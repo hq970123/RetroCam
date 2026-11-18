@@ -3,6 +3,8 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+permissions:
+  contents: write
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -23,3 +25,9 @@ jobs:
         with:
           name: RetroCam-apk
           path: RetroCam-*.apk
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.1.${{ github.run_number }}
+          name: RetroCam v0.1.${{ github.run_number }}
+          files: RetroCam-*.apk
