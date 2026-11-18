@@ -5,7 +5,7 @@ plugins {
 
 android {
     namespace = "com.hq.retrocam"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.hq.retrocam"
@@ -49,7 +49,7 @@ android {
 }
 
 dependencies {
-    val camerax = "1.4.2"
+    val camerax = "1.5.1"
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.exifinterface:exifinterface:1.3.7")
