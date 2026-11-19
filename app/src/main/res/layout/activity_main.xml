@@ -147,12 +147,6 @@
             android:orientation="horizontal"
             android:paddingStart="6dp"
             android:paddingEnd="6dp">
-            <FrameLayout style="@style/ProCell"><TextView android:id="@+id/proShutter" style="@style/ProCirc" /></FrameLayout>
-            <FrameLayout style="@style/ProCell"><TextView android:id="@+id/proIso" style="@style/ProCirc" /></FrameLayout>
-            <FrameLayout style="@style/ProCell"><TextView android:id="@+id/proEv" style="@style/ProCirc" /></FrameLayout>
-            <FrameLayout style="@style/ProCell"><TextView android:id="@+id/proFocus" style="@style/ProCirc" /></FrameLayout>
-            <FrameLayout style="@style/ProCell"><TextView android:id="@+id/proWb" style="@style/ProCirc" /></FrameLayout>
-            <FrameLayout style="@style/ProCell"><TextView android:id="@+id/proLut" style="@style/ProCirc" /></FrameLayout>
         </LinearLayout>
 
         <LinearLayout

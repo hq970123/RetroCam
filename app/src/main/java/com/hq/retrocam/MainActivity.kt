@@ -1459,6 +1459,7 @@ class MainActivity : AppCompatActivity() {
             Pair(ProParam.SHUTTER, R.drawable.ic_aperture), Pair(ProParam.ISO, 0), Pair(ProParam.EV, R.drawable.ic_ev),
             Pair(ProParam.FOCUS, R.drawable.ic_focus), Pair(ProParam.WB, R.drawable.ic_wb), Pair(null, R.drawable.ic_drop),
         )
+        b.proRow.removeAllViews()
         for ((p, ic) in defs) {
             val cell = FrameLayout(this).apply { layoutParams = LinearLayout.LayoutParams(0, dp(54f), 1f) }
             val box = FrameLayout(this).apply {

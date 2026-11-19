@@ -4,7 +4,7 @@ set -x
 OUT=shots; mkdir -p $OUT
 PKG=com.hq.retrocam
 n=0
-shot(){ n=$((n+1)); sleep ${2:-2}; f=$(printf "%02d_%s" $n "$1"); adb exec-out screencap -p > $OUT/$f.png; adb shell uiautomator dump /sdcard/u.xml >/dev/null 2>&1; adb pull /sdcard/u.xml $OUT/$f.xml >/dev/null 2>&1; }
+shot(){ n=$((n+1)); sleep ${2:-2}; anr; f=$(printf "%02d_%s" $n "$1"); adb exec-out screencap -p > $OUT/$f.png; adb shell uiautomator dump /sdcard/u.xml >/dev/null 2>&1; adb pull /sdcard/u.xml $OUT/$f.xml >/dev/null 2>&1; }
 center(){ # $1 = attr regex
   adb shell uiautomator dump /sdcard/u.xml >/dev/null 2>&1; adb pull /sdcard/u.xml /tmp/u.xml >/dev/null 2>&1
   python3 - "$1" <<'PY'
@@ -17,15 +17,16 @@ for node in re.findall(r'<node [^>]*>',x):
             a=list(map(int,b.groups())); print((a[0]+a[2])//2,(a[1]+a[3])//2); break
 PY
 }
-tap_id(){ c=$(center "resource-id=\"$PKG:id/$1\""); [ -n "$c" ] && adb shell input tap $c || echo "MISSING id $1"; }
-tap_text(){ c=$(center "text=\"$1\""); [ -n "$c" ] && adb shell input tap $c || echo "MISSING text $1"; }
-back(){ adb shell input keyevent 4; sleep 1; }
+anr(){ for k in 1 2 3; do c=$(center "text=\"Wait\""); [ -n "$c" ] && { adb shell input tap $c; sleep 2; } || break; done; }
+tap_id(){ anr;  c=$(center "resource-id=\"$PKG:id/$1\""); [ -n "$c" ] && adb shell input tap $c || echo "MISSING id $1"; }
+tap_text(){ anr;  c=$(center "text=\"$1\""); [ -n "$c" ] && adb shell input tap $c || echo "MISSING text $1"; }
+back(){ anr; adb shell input keyevent 4; sleep 1; }
 
 adb install -r -g RetroCam.apk
 adb shell pm grant $PKG android.permission.CAMERA; adb shell pm grant $PKG android.permission.RECORD_AUDIO
 adb logcat -c
 adb shell am start -n $PKG/.MainActivity
-shot main 6
+sleep 20; anr; shot main 4
 tap_id btnQuick; shot quick_sheet; back
 tap_id btnMode; shot mode_sheet; back
 tap_id btnFilter; shot filter_sheet
