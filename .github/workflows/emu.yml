@@ -1,0 +1,33 @@
+name: Emulator UI tour
+on:
+  workflow_dispatch:
+    inputs:
+      apk_tag:
+        description: release tag to test
+        default: v0.1.7
+jobs:
+  tour:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+      - name: Get APK
+        run: curl -fL -o RetroCam.apk https://github.com/${{ github.repository }}/releases/download/${{ inputs.apk_tag }}/RetroCam-${{ inputs.apk_tag }}.apk
+      - uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7_pro
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back emulated -camera-front emulated
+          script: bash tools/emu_tour.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shots
+          path: shots/
