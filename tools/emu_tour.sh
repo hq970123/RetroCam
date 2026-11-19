@@ -14,13 +14,16 @@ for node in re.findall(r'<node [^>]*>',x):
             a=list(map(int,b.groups())); print((a[0]+a[2])//2,(a[1]+a[3])//2); break
 PY
 }
-anr(){ for k in 1 2 3; do c=$(center 'text="Wait"'); [ -n "$c" ] && { adb shell input tap $c; sleep 2; } || break; done; }
+anr(){ for k in 1 2 3; do adb shell dumpsys window | grep mCurrentFocus | grep -qi 'not responding' && { adb shell input tap 337 1358; sleep 2; } || break; done; }
 fg(){ adb shell dumpsys activity activities | grep -q "topResumedActivity.*$PKG" || { echo "app not in front, relaunching"; adb shell am start -n $PKG/.MainActivity; sleep 5; }; }
 shot(){ n=$((n+1)); sleep ${2:-2}; anr; f=$(printf "%02d_%s" $n "$1"); adb exec-out screencap -p > $OUT/$f.png; }
 t(){ anr; adb shell input tap $1 $2; }
 tap_text(){ anr; c=$(center "text=\"$1\""); [ -n "$c" ] && adb shell input tap $c || echo "MISSING text $1"; }
 back(){ anr; adb shell input keyevent 4; sleep 1; fg; }
 Y_TOP=211; Y_PRO=1949; Y_BOT=2176
+adb root >/dev/null 2>&1; sleep 3
+adb shell settings put global hide_error_dialogs 1
+adb shell pm disable-user --user 0 com.google.android.apps.nexuslauncher
 adb install -r -g RetroCam.apk
 adb logcat -c
 adb shell am start -n $PKG/.MainActivity
