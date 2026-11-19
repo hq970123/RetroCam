@@ -5,6 +5,8 @@ on:
       apk_tag:
         description: release tag to test
         default: v0.1.7
+permissions:
+  contents: write
 jobs:
   tour:
     runs-on: ubuntu-latest
@@ -31,3 +33,17 @@ jobs:
         with:
           name: shots
           path: shots/
+      - name: Pack
+        if: always()
+        run: |
+          cd shots && for f in *.png; do convert "$f" -resize 50% "${f%.png}.jpg" 2>/dev/null || cp "$f" "${f%.png}.jpg"; done
+          grep -E "retrocam|AndroidRuntime|FATAL|Camera" logcat.txt | tail -400 > log_short.txt || true
+          zip -q ../shots.zip *.jpg *.xml log_short.txt crash.txt window.txt
+      - name: Publish shots
+        if: always()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: emu-shots-${{ github.run_number }}
+          name: emu shots ${{ github.run_number }}
+          prerelease: true
+          files: shots.zip
