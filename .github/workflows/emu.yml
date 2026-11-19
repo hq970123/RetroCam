@@ -40,7 +40,7 @@ jobs:
         if: always()
         run: |
           cd shots && for f in *.png; do convert "$f" -resize 50% "${f%.png}.jpg" 2>/dev/null || cp "$f" "${f%.png}.jpg"; done
-          grep -E "retrocam|AndroidRuntime|FATAL|Camera" logcat.txt | tail -400 > log_short.txt || true
+          grep -E "retrocam|FATAL|E AndroidRuntime" logcat.txt | grep -v AccessibilityNodeInfoDumper | tail -300 > log_short.txt || true
           zip -q ../shots.zip *.jpg *.xml log_short.txt crash.txt window.txt
       - name: Publish shots
         if: always()

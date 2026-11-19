@@ -1156,8 +1156,11 @@ class MainActivity : AppCompatActivity() {
         val w = r.width().toInt()
         if (lp.width != w) { lp.width = w; b.vfControls.layoutParams = lp }
         b.vfControls.x = r.left
-        val maxBottom = b.bottomPanel.top.toFloat() - dp(6f)
-        b.vfControls.y = minOf(r.bottom, maxBottom) - b.vfControls.height
+        // Sit just below the viewfinder so the zoom row never covers the burned-in date stamp;
+        // only slide up over the image when there is no room (e.g. slider open, tall ratios).
+        val maxTop = b.bottomPanel.top.toFloat() - dp(4f) - b.vfControls.height
+        val below = r.bottom - dp(10f)
+        b.vfControls.y = minOf(below, maxTop)
         b.hudCol.y = r.top + dp(14f)
         if (!vfPlaced && b.vfControls.height > 0) { vfPlaced = true; b.vfControls.visibility = View.VISIBLE }
     }
