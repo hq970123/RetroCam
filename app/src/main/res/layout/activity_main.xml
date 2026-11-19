@@ -5,143 +5,131 @@
     android:layout_height="match_parent"
     android:background="#000000">
 
-    <SurfaceView
-        android:id="@+id/preview"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent" />
+    <SurfaceView android:id="@+id/preview" android:layout_width="match_parent" android:layout_height="match_parent" />
 
-    <com.hq.retrocam.ui.OverlayView
-        android:id="@+id/overlay"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent" />
+    <com.hq.retrocam.ui.OverlayView android:id="@+id/overlay" android:layout_width="match_parent" android:layout_height="match_parent" />
 
-    <ImageView
-        android:id="@+id/ghost"
-        android:layout_width="10dp"
-        android:layout_height="10dp"
-        android:alpha="0.45"
-        android:scaleType="fitXY"
-        android:visibility="gone" />
+    <ImageView android:id="@+id/ghost" android:layout_width="10dp" android:layout_height="10dp"
+        android:alpha="0.45" android:scaleType="fitXY" android:visibility="gone" />
 
-    <View
-        android:id="@+id/flashOverlay"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:alpha="0"
-        android:background="#FFFFFF" />
+    <View android:id="@+id/flashOverlay" android:layout_width="match_parent" android:layout_height="match_parent"
+        android:alpha="0" android:background="#000000" />
 
-    <!-- Top bar -->
+    <!-- Top bar: format / ratio / flash / settings -->
     <LinearLayout
         android:id="@+id/topBar"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_gravity="top"
-        android:background="@color/panel"
         android:gravity="center_vertical"
         android:orientation="horizontal"
         android:paddingStart="8dp"
         android:paddingTop="36dp"
         android:paddingEnd="8dp"
-        android:paddingBottom="8dp">
-
-        <TextView android:id="@+id/btnFlash" style="@style/TopBtn" android:text="闪光 关" />
-        <TextView android:id="@+id/btnTimer" style="@style/TopBtn" android:text="定时 关" />
-        <TextView android:id="@+id/btnRatio" style="@style/TopBtn" android:text="4:3" />
-        <TextView android:id="@+id/btnFormat" style="@style/TopBtn" android:text="1080p 30" android:visibility="gone" />
-        <TextView android:id="@+id/btnDate" style="@style/TopBtn" android:text="日期 开" />
-        <TextView android:id="@+id/btnAssist" style="@style/TopBtn" android:text="辅助 ▾" />
+        android:paddingBottom="10dp">
+        <FrameLayout style="@style/TopCell"><TextView android:id="@+id/btnFormat" style="@style/PillBtn" android:layout_gravity="center" android:text="JPG" /></FrameLayout>
+        <FrameLayout style="@style/TopCell"><TextView android:id="@+id/btnRatio" style="@style/PillBtn" android:layout_gravity="center" android:text="4:3" /></FrameLayout>
+        <FrameLayout style="@style/TopCell"><ImageView android:id="@+id/btnFlash" style="@style/CircBtn" android:layout_gravity="center" android:src="@drawable/ic_flash_off" /></FrameLayout>
+        <FrameLayout style="@style/TopCell"><ImageView android:id="@+id/btnSettings" style="@style/CircBtn" android:layout_gravity="center" android:src="@drawable/ic_settings" /></FrameLayout>
     </LinearLayout>
 
-    <HorizontalScrollView
-        android:id="@+id/assistPanel"
-        android:layout_width="match_parent"
+    <!-- HUDs over the viewfinder (positioned in code) -->
+    <LinearLayout
+        android:id="@+id/hudCol"
+        android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_gravity="top"
-        android:layout_marginTop="84dp"
-        android:background="@color/panel"
-        android:paddingTop="8dp"
-        android:paddingBottom="8dp"
-        android:scrollbars="none"
-        android:visibility="gone">
+        android:layout_gravity="top|center_horizontal"
+        android:gravity="center_horizontal"
+        android:orientation="vertical">
         <LinearLayout
+            android:id="@+id/recHud"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:background="@drawable/hud_bg"
+            android:gravity="center_vertical"
             android:orientation="horizontal"
-            android:paddingStart="8dp"
-            android:paddingEnd="8dp">
-            <TextView android:id="@+id/asGrid" style="@style/FxChip" android:text="网格" />
-            <TextView android:id="@+id/asLevel" style="@style/FxChip" android:text="水平仪" />
-            <TextView android:id="@+id/asHist" style="@style/FxChip" android:text="直方图" />
-            <TextView android:id="@+id/asPeak" style="@style/FxChip" android:text="峰值对焦" />
-            <TextView android:id="@+id/asZebra" style="@style/FxChip" android:text="斑马纹" />
-            <TextView android:id="@+id/asRaw" style="@style/FxChip" android:text="RAW" />
-            <TextView android:id="@+id/asStab" style="@style/FxChip" android:text="防抖" />
+            android:paddingStart="12dp" android:paddingTop="5dp" android:paddingEnd="12dp" android:paddingBottom="5dp"
+            android:visibility="gone">
+            <View android:id="@+id/recDot" android:layout_width="9dp" android:layout_height="9dp" android:background="@drawable/rec_dot" />
+            <TextView android:id="@+id/recTime" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:layout_marginStart="8dp" android:fontFamily="monospace" android:text="00:00" android:textColor="#FFFFFF" android:textSize="15sp" android:textStyle="bold" />
+            <com.hq.retrocam.ui.AudioMeterView android:id="@+id/audioMeter" android:layout_width="56dp" android:layout_height="10dp" android:layout_marginStart="10dp" />
         </LinearLayout>
-    </HorizontalScrollView>
-
-    <!-- Recording HUD -->
-    <LinearLayout
-        android:id="@+id/recHud"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="top|center_horizontal"
-        android:layout_marginTop="100dp"
-        android:background="@drawable/chip_bg"
-        android:gravity="center_vertical"
-        android:orientation="horizontal"
-        android:paddingStart="12dp"
-        android:paddingTop="4dp"
-        android:paddingEnd="12dp"
-        android:paddingBottom="4dp"
-        android:visibility="gone">
-        <View android:id="@+id/recDot" android:layout_width="10dp" android:layout_height="10dp" android:background="@drawable/shutter_video" />
-        <TextView android:id="@+id/recTime" android:layout_width="wrap_content" android:layout_height="wrap_content"
-            android:layout_marginStart="8dp" android:fontFamily="monospace" android:text="REC 00:00" android:textColor="#FFFFFF" android:textSize="15sp" android:textStyle="bold" />
-        <com.hq.retrocam.ui.AudioMeterView android:id="@+id/audioMeter" android:layout_width="64dp" android:layout_height="12dp"
-            android:layout_marginStart="10dp" />
+        <TextView
+            android:id="@+id/creativeHud"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:background="@drawable/hud_bg"
+            android:paddingStart="12dp" android:paddingTop="5dp" android:paddingEnd="12dp" android:paddingBottom="5dp"
+            android:textColor="#FFFFFF"
+            android:textSize="13sp"
+            android:visibility="gone" />
     </LinearLayout>
 
-    <TextView
-        android:id="@+id/creativeHud"
-        android:layout_width="wrap_content"
+    <TextView android:id="@+id/countdown" android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:layout_gravity="center" android:shadowColor="#000000" android:shadowRadius="12"
+        android:textColor="#FFFFFF" android:textSize="96sp" android:textStyle="bold" android:visibility="gone" />
+
+    <!-- Controls inside the bottom of the viewfinder (positioned in code) -->
+    <LinearLayout
+        android:id="@+id/vfControls"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_gravity="top|center_horizontal"
-        android:layout_marginTop="140dp"
-        android:background="@drawable/chip_bg"
+        android:orientation="vertical"
         android:paddingStart="12dp"
-        android:paddingTop="4dp"
         android:paddingEnd="12dp"
-        android:paddingBottom="4dp"
-        android:textColor="#FFB547"
-        android:textSize="14sp"
-        android:textStyle="bold"
-        android:visibility="gone" />
+        android:paddingBottom="10dp">
 
-    <TextView
-        android:id="@+id/countdown"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="center"
-        android:shadowColor="#000000"
-        android:shadowRadius="12"
-        android:textColor="#FFFFFF"
-        android:textSize="96sp"
-        android:textStyle="bold"
-        android:visibility="gone" />
+        <LinearLayout
+            android:id="@+id/sliderRow"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="10dp"
+            android:background="@drawable/hud_bg"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="14dp"
+            android:paddingEnd="8dp"
+            android:visibility="gone">
+            <TextView android:id="@+id/sliderLabel" android:layout_width="78dp" android:layout_height="wrap_content"
+                android:fontFamily="monospace" android:textColor="#FFFFFF" android:textSize="14sp" android:textStyle="bold" />
+            <SeekBar android:id="@+id/slider" android:layout_width="0dp" android:layout_height="40dp" android:layout_weight="1" />
+            <TextView android:id="@+id/sliderAuto" android:layout_width="34dp" android:layout_height="34dp"
+                android:background="@drawable/vf_circ" android:gravity="center" android:text="A" android:textColor="#FFFFFF" android:textStyle="bold" />
+        </LinearLayout>
 
-    <TextView
-        android:id="@+id/toast"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="center"
-        android:background="@drawable/chip_bg"
-        android:paddingStart="16dp"
-        android:paddingTop="8dp"
-        android:paddingEnd="16dp"
-        android:paddingBottom="8dp"
-        android:textColor="#FFFFFF"
-        android:textSize="16sp"
-        android:visibility="gone" />
+        <HorizontalScrollView
+            android:id="@+id/optScroll"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="10dp"
+            android:scrollbars="none"
+            android:visibility="gone">
+            <LinearLayout android:id="@+id/optStrip" android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal" />
+        </HorizontalScrollView>
+
+        <FrameLayout android:layout_width="match_parent" android:layout_height="wrap_content">
+            <LinearLayout
+                android:id="@+id/zoomStrip"
+                android:layout_width="wrap_content"
+                android:layout_height="44dp"
+                android:layout_gravity="bottom|center_horizontal"
+                android:gravity="center_vertical"
+                android:orientation="horizontal" />
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="bottom|end"
+                android:orientation="vertical">
+                <TextView android:id="@+id/btnAuto" android:layout_width="44dp" android:layout_height="44dp"
+                    android:background="@drawable/vf_circ" android:gravity="center" android:text="A"
+                    android:textColor="#FFFFFF" android:textSize="18sp" />
+                <ImageView android:id="@+id/btnQuick" android:layout_width="44dp" android:layout_height="44dp"
+                    android:layout_marginTop="10dp" android:background="@drawable/vf_circ" android:padding="11dp" android:src="@drawable/ic_dots" />
+            </LinearLayout>
+        </FrameLayout>
+    </LinearLayout>
 
     <!-- Bottom panel -->
     <LinearLayout
@@ -149,204 +137,147 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom"
-        android:background="@color/panel"
         android:orientation="vertical"
-        android:paddingBottom="28dp">
+        android:paddingBottom="16dp">
 
         <LinearLayout
-            android:id="@+id/sliderRow"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:gravity="center_vertical"
-            android:orientation="horizontal"
-            android:paddingStart="16dp"
-            android:paddingTop="10dp"
-            android:paddingEnd="12dp"
-            android:visibility="gone">
-            <TextView android:id="@+id/sliderLabel" android:layout_width="84dp" android:layout_height="wrap_content"
-                android:fontFamily="monospace" android:textColor="#FFB547" android:textSize="15sp" android:textStyle="bold" />
-            <SeekBar android:id="@+id/slider" android:layout_width="0dp" android:layout_height="36dp" android:layout_weight="1" />
-            <TextView android:id="@+id/sliderAuto" style="@style/FxChip" android:text="A" />
-        </LinearLayout>
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:gravity="center"
-            android:orientation="horizontal"
-            android:paddingTop="10dp">
-            <TextView android:id="@+id/tabFx" style="@style/ModeText" android:textSize="13sp" android:text="效果" />
-            <TextView android:id="@+id/tabPro" style="@style/ModeText" android:textSize="13sp" android:text="专业" />
-            <TextView android:id="@+id/tabColor" style="@style/ModeText" android:textSize="13sp" android:text="调色" />
-            <TextView android:id="@+id/tabCreative" style="@style/ModeText" android:textSize="13sp" android:text="创意" />
-        </LinearLayout>
-
-        <LinearLayout
-            android:id="@+id/creativePanel"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:visibility="gone">
-            <HorizontalScrollView android:layout_width="match_parent" android:layout_height="wrap_content"
-                android:layout_marginTop="6dp" android:scrollbars="none">
-                <LinearLayout android:id="@+id/creativeStrip" android:layout_width="wrap_content" android:layout_height="wrap_content"
-                    android:orientation="horizontal" android:paddingStart="8dp" android:paddingEnd="8dp" />
-            </HorizontalScrollView>
-            <HorizontalScrollView android:layout_width="match_parent" android:layout_height="wrap_content"
-                android:layout_marginTop="8dp" android:scrollbars="none">
-                <LinearLayout android:id="@+id/optStrip" android:layout_width="wrap_content" android:layout_height="wrap_content"
-                    android:orientation="horizontal" android:paddingStart="8dp" android:paddingEnd="8dp" />
-            </HorizontalScrollView>
-            <HorizontalScrollView android:id="@+id/borderScroll" android:layout_width="match_parent" android:layout_height="wrap_content"
-                android:layout_marginTop="8dp" android:scrollbars="none">
-                <LinearLayout android:id="@+id/borderStrip" android:layout_width="wrap_content" android:layout_height="wrap_content"
-                    android:orientation="horizontal" android:paddingStart="8dp" android:paddingEnd="8dp" />
-            </HorizontalScrollView>
-        </LinearLayout>
-
-        <LinearLayout
-            android:id="@+id/colorPanel"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:visibility="gone">
-            <HorizontalScrollView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:scrollbars="none">
-                <LinearLayout
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:orientation="horizontal"
-                    android:paddingStart="8dp"
-                    android:paddingEnd="8dp">
-                    <TextView android:id="@+id/colLog" style="@style/FxChip" android:text="Log 关" />
-                    <TextView android:id="@+id/colConvert" style="@style/FxChip" android:text="内置转换 开" />
-                    <TextView android:id="@+id/colBurn" style="@style/FxChip" android:text="烧录 开" />
-                </LinearLayout>
-            </HorizontalScrollView>
-            <HorizontalScrollView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:scrollbars="none">
-                <LinearLayout
-                    android:id="@+id/lutStrip"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:orientation="horizontal"
-                    android:paddingStart="8dp"
-                    android:paddingEnd="8dp" />
-            </HorizontalScrollView>
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:gravity="center_vertical"
-                android:orientation="horizontal"
-                android:paddingStart="16dp"
-                android:paddingTop="4dp"
-                android:paddingEnd="16dp">
-                <TextView android:id="@+id/lutLabel" android:layout_width="96dp" android:layout_height="wrap_content"
-                    android:text="LUT 100%" android:textColor="#FFB547" android:textSize="13sp" android:textStyle="bold" />
-                <SeekBar android:id="@+id/lutSeek" android:layout_width="0dp" android:layout_height="32dp" android:layout_weight="1" android:max="100" />
-            </LinearLayout>
-        </LinearLayout>
-
-        <HorizontalScrollView
             android:id="@+id/proRow"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="6dp"
-            android:scrollbars="none"
-            android:visibility="gone">
-            <LinearLayout
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:paddingStart="8dp"
-                android:paddingEnd="8dp">
-                <TextView android:id="@+id/proIso" style="@style/FxChip" android:fontFamily="monospace" android:text="ISO A" />
-                <TextView android:id="@+id/proShutter" style="@style/FxChip" android:fontFamily="monospace" android:text="S A" />
-                <TextView android:id="@+id/proEv" style="@style/FxChip" android:fontFamily="monospace" android:text="EV 0" />
-                <TextView android:id="@+id/proWb" style="@style/FxChip" android:text="WB 自动" />
-                <TextView android:id="@+id/proFocus" style="@style/FxChip" android:fontFamily="monospace" android:text="MF A" />
-                <TextView android:id="@+id/proReset" style="@style/FxChip" android:text="全自动" />
+            android:orientation="horizontal"
+            android:paddingStart="6dp"
+            android:paddingEnd="6dp">
+            <FrameLayout style="@style/ProCell"><TextView android:id="@+id/proShutter" style="@style/ProCirc" /></FrameLayout>
+            <FrameLayout style="@style/ProCell"><TextView android:id="@+id/proIso" style="@style/ProCirc" /></FrameLayout>
+            <FrameLayout style="@style/ProCell"><TextView android:id="@+id/proEv" style="@style/ProCirc" /></FrameLayout>
+            <FrameLayout style="@style/ProCell"><TextView android:id="@+id/proFocus" style="@style/ProCirc" /></FrameLayout>
+            <FrameLayout style="@style/ProCell"><TextView android:id="@+id/proWb" style="@style/ProCirc" /></FrameLayout>
+            <FrameLayout style="@style/ProCell"><TextView android:id="@+id/proLut" style="@style/ProCirc" /></FrameLayout>
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="100dp"
+            android:layout_marginTop="10dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="6dp"
+            android:paddingEnd="6dp">
+            <FrameLayout android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1">
+                <ImageView android:id="@+id/thumb" android:layout_width="54dp" android:layout_height="54dp" android:layout_gravity="center"
+                    android:background="@drawable/thumb_bg" android:padding="13dp" android:scaleType="centerCrop" android:src="@drawable/ic_gallery" />
+            </FrameLayout>
+            <FrameLayout android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1">
+                <ImageView android:id="@+id/btnMode" android:layout_width="46dp" android:layout_height="46dp" android:layout_gravity="center"
+                    android:background="@drawable/circ_btn" android:padding="12dp" android:src="@drawable/ic_camera" />
+            </FrameLayout>
+            <FrameLayout android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1.4">
+                <ImageView android:id="@+id/shutter" android:layout_width="78dp" android:layout_height="78dp" android:layout_gravity="center"
+                    android:src="@drawable/shutter_photo" />
+            </FrameLayout>
+            <LinearLayout android:id="@+id/btnFilter" android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1"
+                android:gravity="center" android:orientation="vertical">
+                <ImageView android:id="@+id/filterIcon" android:layout_width="34dp" android:layout_height="34dp" android:src="@drawable/ic_filter" />
+                <TextView android:id="@+id/filterLabel" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp" android:maxLines="1" android:ellipsize="end" android:maxWidth="76dp"
+                    android:text="原图" android:textColor="#B3FFFFFF" android:textSize="11sp" />
+            </LinearLayout>
+            <FrameLayout android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1">
+                <ImageView android:id="@+id/btnFlip" android:layout_width="50dp" android:layout_height="50dp" android:layout_gravity="center"
+                    android:background="@drawable/circ_btn" android:padding="12dp" android:src="@drawable/ic_flip" />
+            </FrameLayout>
+        </LinearLayout>
+    </LinearLayout>
+
+    <!-- Tap-outside catcher for sheets -->
+    <View android:id="@+id/scrim" android:layout_width="match_parent" android:layout_height="match_parent"
+        android:background="#00000000" android:clickable="true" android:focusable="true" android:visibility="gone" />
+
+    <!-- Quick toggles / mode picker (shared sheet) -->
+    <LinearLayout
+        android:id="@+id/sheet"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:layout_marginStart="18dp"
+        android:layout_marginEnd="18dp"
+        android:layout_marginBottom="40dp"
+        android:background="@drawable/sheet_bg"
+        android:clickable="true"
+        android:focusable="true"
+        android:orientation="vertical"
+        android:paddingTop="22dp"
+        android:paddingBottom="18dp"
+        android:visibility="gone">
+        <TextView android:id="@+id/sheetTitle" android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:layout_marginStart="24dp" android:layout_marginBottom="8dp" android:textColor="#8CFFFFFF" android:textSize="13sp" android:visibility="gone" />
+        <LinearLayout android:id="@+id/sheetGrid" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" />
+    </LinearLayout>
+
+    <!-- Filter sheet -->
+    <LinearLayout
+        android:id="@+id/filterSheet"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:background="@drawable/filter_bg"
+        android:clickable="true"
+        android:focusable="true"
+        android:orientation="vertical"
+        android:paddingTop="12dp"
+        android:paddingBottom="24dp"
+        android:visibility="gone">
+        <HorizontalScrollView android:layout_width="match_parent" android:layout_height="wrap_content" android:scrollbars="none">
+            <LinearLayout android:id="@+id/catStrip" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:orientation="horizontal" android:paddingStart="12dp" android:paddingEnd="12dp" />
+        </HorizontalScrollView>
+        <HorizontalScrollView android:id="@+id/tileScroll" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="14dp" android:scrollbars="none">
+            <LinearLayout android:id="@+id/tileStrip" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:orientation="horizontal" android:paddingStart="10dp" android:paddingEnd="10dp" />
+        </HorizontalScrollView>
+        <HorizontalScrollView android:id="@+id/fxScroll" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="14dp" android:scrollbars="none">
+            <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal"
+                android:paddingStart="10dp" android:paddingEnd="10dp">
+                <TextView android:id="@+id/fxGrain" style="@style/FxChip" android:text="颗粒" />
+                <TextView android:id="@+id/fxVignette" style="@style/FxChip" android:text="暗角" />
+                <TextView android:id="@+id/fxLeak" style="@style/FxChip" android:text="漏光" />
+                <TextView android:id="@+id/fxIntensity" style="@style/FxChip" android:text="强度 100%" />
             </LinearLayout>
         </HorizontalScrollView>
-
-        <LinearLayout
-            android:id="@+id/fxRow"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:gravity="center"
-            android:orientation="horizontal"
-            android:paddingTop="6dp">
-            <TextView android:id="@+id/fxGrain" style="@style/FxChip" android:text="颗粒" />
-            <TextView android:id="@+id/fxVignette" style="@style/FxChip" android:text="暗角" />
-            <TextView android:id="@+id/fxLeak" style="@style/FxChip" android:text="漏光" />
-            <TextView android:id="@+id/fxIntensity" style="@style/FxChip" android:text="强度 100%" />
+        <LinearLayout android:id="@+id/lutRow" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="10dp" android:gravity="center_vertical" android:orientation="horizontal"
+            android:paddingStart="18dp" android:paddingEnd="18dp" android:visibility="gone">
+            <TextView android:id="@+id/lutLabel" android:layout_width="84dp" android:layout_height="wrap_content"
+                android:text="强度 100%" android:textColor="#FFFFFF" android:textSize="13sp" />
+            <SeekBar android:id="@+id/lutSeek" android:layout_width="0dp" android:layout_height="36dp" android:layout_weight="1" android:max="100" />
         </LinearLayout>
+    </LinearLayout>
 
-        <HorizontalScrollView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
-            android:scrollbars="none">
-            <LinearLayout
-                android:id="@+id/styleStrip"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:paddingStart="12dp"
-                android:paddingEnd="12dp" />
-        </HorizontalScrollView>
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:gravity="center"
-            android:orientation="horizontal">
-            <TextView android:id="@+id/modePhoto" style="@style/ModeText" android:text="拍照" />
-            <TextView android:id="@+id/modeVideo" style="@style/ModeText" android:text="录像" />
-        </LinearLayout>
-
-        <FrameLayout
-            android:layout_width="match_parent"
-            android:layout_height="96dp"
-            android:layout_marginTop="8dp">
-
-            <ImageView
-                android:id="@+id/thumb"
-                android:layout_width="52dp"
-                android:layout_height="52dp"
-                android:layout_gravity="center_vertical|start"
-                android:layout_marginStart="36dp"
-                android:background="@drawable/thumb_bg"
-                android:clipToOutline="true"
-                android:padding="2dp"
-                android:scaleType="centerCrop" />
-
-            <ImageView
-                android:id="@+id/shutter"
-                android:layout_width="80dp"
-                android:layout_height="80dp"
-                android:layout_gravity="center"
-                android:src="@drawable/shutter_photo" />
-
-            <TextView
-                android:id="@+id/btnFlip"
-                android:layout_width="52dp"
-                android:layout_height="52dp"
-                android:layout_gravity="center_vertical|end"
-                android:layout_marginEnd="36dp"
-                android:background="@drawable/round_btn"
-                android:gravity="center"
-                android:text="⟲"
-                android:textColor="#FFFFFF"
-                android:textSize="26sp" />
+    <!-- Settings page -->
+    <LinearLayout
+        android:id="@+id/settings"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#000000"
+        android:clickable="true"
+        android:focusable="true"
+        android:orientation="vertical"
+        android:visibility="gone">
+        <FrameLayout android:id="@+id/settingsHeader" android:layout_width="match_parent" android:layout_height="wrap_content" android:paddingTop="36dp">
+            <ImageView android:id="@+id/settingsBack" android:layout_width="48dp" android:layout_height="48dp"
+                android:layout_marginStart="8dp" android:padding="12dp" android:src="@drawable/ic_back" />
+            <TextView android:layout_width="wrap_content" android:layout_height="48dp" android:layout_gravity="center_horizontal"
+                android:gravity="center" android:text="设置" android:textColor="#FFFFFF" android:textSize="19sp" android:textStyle="bold" />
         </FrameLayout>
+        <LinearLayout android:id="@+id/segBar" android:layout_width="match_parent" android:layout_height="52dp"
+            android:layout_marginStart="16dp" android:layout_marginTop="8dp" android:layout_marginEnd="16dp"
+            android:background="@drawable/seg_bg" android:orientation="horizontal" android:padding="4dp" />
+        <ScrollView android:id="@+id/settingsScroll" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1">
+            <LinearLayout android:id="@+id/settingsList" android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="vertical" android:paddingStart="16dp" android:paddingEnd="16dp" android:paddingBottom="32dp" />
+        </ScrollView>
     </LinearLayout>
 
     <!-- Photo editor -->
@@ -359,53 +290,62 @@
         android:focusable="true"
         android:orientation="vertical"
         android:visibility="gone">
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:gravity="center_vertical"
-            android:orientation="horizontal"
-            android:paddingStart="8dp"
-            android:paddingTop="36dp"
-            android:paddingEnd="8dp"
-            android:paddingBottom="8dp">
-            <TextView android:id="@+id/editCancel" style="@style/FxChip" android:text="取消" />
-            <TextView android:id="@+id/editTitle" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
-                android:gravity="center" android:text="编辑" android:textColor="#FFFFFF" android:textSize="16sp" android:textStyle="bold" />
-            <TextView android:id="@+id/editSave" style="@style/FxChip" android:text="保存副本" android:textColor="#FFB547" />
-        </LinearLayout>
-        <FrameLayout android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1">
-            <ImageView android:id="@+id/editImage" android:layout_width="match_parent" android:layout_height="match_parent"
-                android:scaleType="fitCenter" />
-            <ProgressBar android:id="@+id/editBusy" android:layout_width="40dp" android:layout_height="40dp"
-                android:layout_gravity="center" android:visibility="gone" />
+        <FrameLayout android:id="@+id/editHeader" android:layout_width="match_parent" android:layout_height="wrap_content" android:paddingTop="36dp">
+            <ImageView android:id="@+id/editCancel" android:layout_width="48dp" android:layout_height="48dp"
+                android:layout_marginStart="8dp" android:padding="12dp" android:src="@drawable/ic_close" />
+            <TextView android:id="@+id/editTitle" android:layout_width="wrap_content" android:layout_height="48dp" android:layout_gravity="center_horizontal"
+                android:gravity="center" android:text="编辑" android:textColor="#FFFFFF" android:textSize="17sp" android:textStyle="bold" />
+            <TextView android:id="@+id/editSave" android:layout_width="wrap_content" android:layout_height="36dp"
+                android:layout_gravity="end|center_vertical" android:layout_marginEnd="14dp" android:background="@drawable/save_btn_bg"
+                android:gravity="center" android:paddingStart="18dp" android:paddingEnd="18dp" android:text="保存" android:textColor="#FFFFFF" android:textSize="14sp" android:textStyle="bold" />
         </FrameLayout>
-        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:background="@color/panel" android:orientation="vertical" android:paddingTop="8dp" android:paddingBottom="28dp">
-            <HorizontalScrollView android:layout_width="match_parent" android:layout_height="wrap_content" android:scrollbars="none">
-                <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal"
-                    android:paddingStart="8dp" android:paddingEnd="8dp">
-                    <TextView android:id="@+id/editIntensity" style="@style/FxChip" android:text="强度 100%" />
-                    <TextView android:id="@+id/editGrain" style="@style/FxChip" android:text="颗粒" />
-                    <TextView android:id="@+id/editVignette" style="@style/FxChip" android:text="暗角" />
-                    <TextView android:id="@+id/editLeak" style="@style/FxChip" android:text="漏光" />
-                    <TextView android:id="@+id/editDate" style="@style/FxChip" android:text="日期" />
-                </LinearLayout>
-            </HorizontalScrollView>
-            <HorizontalScrollView android:layout_width="match_parent" android:layout_height="wrap_content"
-                android:layout_marginTop="8dp" android:scrollbars="none">
-                <LinearLayout android:id="@+id/editStyleStrip" android:layout_width="wrap_content" android:layout_height="wrap_content"
-                    android:orientation="horizontal" android:paddingStart="8dp" android:paddingEnd="8dp" />
-            </HorizontalScrollView>
-            <HorizontalScrollView android:layout_width="match_parent" android:layout_height="wrap_content"
-                android:layout_marginTop="8dp" android:scrollbars="none">
-                <LinearLayout android:id="@+id/editLutStrip" android:layout_width="wrap_content" android:layout_height="wrap_content"
-                    android:orientation="horizontal" android:paddingStart="8dp" android:paddingEnd="8dp" />
-            </HorizontalScrollView>
-            <HorizontalScrollView android:layout_width="match_parent" android:layout_height="wrap_content"
-                android:layout_marginTop="8dp" android:scrollbars="none">
-                <LinearLayout android:id="@+id/editBorderStrip" android:layout_width="wrap_content" android:layout_height="wrap_content"
-                    android:orientation="horizontal" android:paddingStart="8dp" android:paddingEnd="8dp" />
-            </HorizontalScrollView>
+        <FrameLayout android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:padding="12dp">
+            <ImageView android:id="@+id/editImage" android:layout_width="match_parent" android:layout_height="match_parent" android:scaleType="fitCenter" />
+            <ProgressBar android:id="@+id/editBusy" android:layout_width="40dp" android:layout_height="40dp" android:layout_gravity="center" android:visibility="gone" />
+        </FrameLayout>
+        <LinearLayout android:id="@+id/editBottom" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:orientation="vertical" android:paddingTop="8dp" android:paddingBottom="16dp">
+            <FrameLayout android:layout_width="match_parent" android:layout_height="110dp">
+                <HorizontalScrollView android:id="@+id/editPaneStyle" android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:layout_gravity="center_vertical" android:scrollbars="none">
+                    <LinearLayout android:id="@+id/editStyleStrip" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                        android:orientation="horizontal" android:paddingStart="10dp" android:paddingEnd="10dp" />
+                </HorizontalScrollView>
+                <HorizontalScrollView android:id="@+id/editPaneLut" android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:layout_gravity="center_vertical" android:scrollbars="none" android:visibility="gone">
+                    <LinearLayout android:id="@+id/editLutStrip" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                        android:orientation="horizontal" android:paddingStart="10dp" android:paddingEnd="10dp" />
+                </HorizontalScrollView>
+                <HorizontalScrollView android:id="@+id/editPaneBorder" android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:layout_gravity="center_vertical" android:scrollbars="none" android:visibility="gone">
+                    <LinearLayout android:id="@+id/editBorderStrip" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                        android:orientation="horizontal" android:paddingStart="10dp" android:paddingEnd="10dp" />
+                </HorizontalScrollView>
+                <HorizontalScrollView android:id="@+id/editPaneFx" android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:layout_gravity="center_vertical" android:scrollbars="none" android:visibility="gone">
+                    <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal"
+                        android:paddingStart="10dp" android:paddingEnd="10dp">
+                        <TextView android:id="@+id/editIntensity" style="@style/FxChip" android:text="强度 100%" />
+                        <TextView android:id="@+id/editGrain" style="@style/FxChip" android:text="颗粒" />
+                        <TextView android:id="@+id/editVignette" style="@style/FxChip" android:text="暗角" />
+                        <TextView android:id="@+id/editLeak" style="@style/FxChip" android:text="漏光" />
+                        <TextView android:id="@+id/editDate" style="@style/FxChip" android:text="日期" />
+                    </LinearLayout>
+                </HorizontalScrollView>
+            </FrameLayout>
+            <LinearLayout android:layout_width="match_parent" android:layout_height="48dp" android:layout_marginStart="16dp"
+                android:layout_marginTop="8dp" android:layout_marginEnd="16dp" android:background="@drawable/seg_bg"
+                android:orientation="horizontal" android:padding="4dp">
+                <TextView android:id="@+id/editTabStyle" style="@style/EditTab" android:text="滤镜" />
+                <TextView android:id="@+id/editTabLut" style="@style/EditTab" android:text="LUT" />
+                <TextView android:id="@+id/editTabFx" style="@style/EditTab" android:text="效果" />
+                <TextView android:id="@+id/editTabBorder" style="@style/EditTab" android:text="水印" />
+            </LinearLayout>
         </LinearLayout>
     </LinearLayout>
+
+    <TextView android:id="@+id/toast" android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:layout_gravity="center" android:layout_marginStart="32dp" android:layout_marginEnd="32dp" android:background="@drawable/hud_bg"
+        android:gravity="center" android:paddingStart="16dp" android:paddingTop="9dp" android:paddingEnd="16dp" android:paddingBottom="9dp"
+        android:textColor="#FFFFFF" android:textSize="15sp" android:visibility="gone" />
 </FrameLayout>

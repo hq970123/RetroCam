@@ -72,7 +72,17 @@ import android.graphics.Rect
 import android.graphics.ImageDecoder
 import android.widget.FrameLayout
 import java.io.File
+import android.graphics.RectF
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.view.Gravity
+import android.view.KeyEvent
+import android.widget.ImageView
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import java.util.concurrent.Executors
+
 
 class MainActivity : AppCompatActivity() {
     private lateinit var b: ActivityMainBinding
@@ -101,7 +111,6 @@ class MainActivity : AppCompatActivity() {
     private var busy = false
     private var lastUri: Uri? = null
     private var lastIsVideo = false
-    private val styleViews = ArrayList<TextView>()
 
     // Phase 2
     private data class Ratio(val label: String, val r: Float)
@@ -109,7 +118,6 @@ class MainActivity : AppCompatActivity() {
     private val videoRatios = listOf(Ratio("16:9", 16f / 9f), Ratio("2.39:1", 2.39f))
     private var photoRatioIdx = 0
     private var videoRatioIdx = 0
-    private var assistOpen = false
     private var stabPref = true
     private var fmtPref: VideoFormat? = null
     private var gridOn = false
@@ -117,9 +125,6 @@ class MainActivity : AppCompatActivity() {
     private var histOn = false
     private var peakOn = false
     private var zebraOn = false
-    /** Bottom tab: 0 effects, 1 pro, 2 colour. */
-    private var tab = 0
-    private val proTab get() = tab == 1
 
     // Phase 3
     private val lutLib by lazy { LutLibrary(this) }
@@ -128,14 +133,13 @@ class MainActivity : AppCompatActivity() {
     private var profileLog = false
     private var convertOn = true
     private var burnIn = true
-    private val lutViews = ArrayList<Pair<String?, TextView>>()
     private val importLut = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) return@registerForActivityResult
         showToast("正在导入 LUT…")
         io.execute {
             try {
                 val e = lutLib.import(uri)
-                main.post { buildLutStrip(); selectLut(e.id); showToast("已导入 ${e.name}") }
+                main.post { filterCat = LUT_CAT; selectLut(e.id); if (sheet == Sheet.FILTER) buildFilter(); showToast("已导入 ${e.name}") }
             } catch (t: Throwable) {
                 main.post { showToast("导入失败: ${t.message}") }
             }
@@ -153,11 +157,30 @@ class MainActivity : AppCompatActivity() {
     private var multiScreen = true
     private var multiFirst: Bitmap? = null
     private val tlIntervals = floatArrayOf(0f, 0.5f, 1f, 2f, 5f)
-    private var tlIdx = 0
+    private var tlIdx = 2
     private var border = Border.NONE
     private var liveRec: VideoRecorder? = null
     private var accumSecs = 0f
     private val pickPhoto = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri -> if (uri != null) openEditor(uri) }
+
+    // UI v2 (极影-style)
+    private enum class UiMode(val label: String, val icon: Int) {
+        PHOTO("拍照", R.drawable.ic_camera), VIDEO("录像", R.drawable.ic_video), TIMELAPSE("延时摄影", R.drawable.ic_timelapse),
+        SLOW("慢快门", R.drawable.ic_slow), BLUR("运动模糊", R.drawable.ic_blur), LIGHT("光绘", R.drawable.ic_light),
+        MULTI("多重曝光", R.drawable.ic_multi), LIVE("动态照片", R.drawable.ic_live),
+    }
+    private var uiMode = UiMode.PHOTO
+    private enum class Sheet { NONE, QUICK, MODE, FILTER }
+    private var sheet = Sheet.NONE
+    private var filterCat = 0
+    private var settingsTab = 0
+    private var mirrorFront = true
+    private var volShutter = true
+    private var shutterBlink = true
+    private var vfPlaced = false
+    private val ACCENT = 0xFFF04A2C.toInt()
+    private val WHITE = 0xFFFFFFFF.toInt()
+    private val GREY = 0xFF8C8C8C.toInt()
 
     // editor
     private val editParams = LookParams()
@@ -173,11 +196,16 @@ class MainActivity : AppCompatActivity() {
     private var editRendering = false
     private var editDirty = false
     private var editSaving = false
-    private val editStyleViews = ArrayList<TextView>()
-    private val editLutViews = ArrayList<Pair<String?, TextView>>()
-    private val editBorderViews = ArrayList<Pair<Border, TextView>>()
+    private var editTab = 0
     private val backCb = object : OnBackPressedCallback(false) {
-        override fun handleOnBackPressed() { closeEditor() }
+        override fun handleOnBackPressed() {
+            when {
+                b.editor.visibility == View.VISIBLE -> closeEditor()
+                b.settings.visibility == View.VISIBLE -> closeSettings()
+                sheet != Sheet.NONE -> closeSheet()
+                activeParam != null -> { activeParam = null; refreshUi(); syncBack() }
+            }
+        }
     }
 
     private var activeParam: ProParam? = null
@@ -205,6 +233,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
         b = ActivityMainBinding.inflate(layoutInflater)
         setContentView(b.root)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -214,6 +243,8 @@ class MainActivity : AppCompatActivity() {
         cam = CameraController(this, renderer)
         cam.stabRequested = stabPref
         cam.videoFormat = fmtPref
+        cam.logRequested = profileLog
+        renderer.sideInset = dp(12f)
         renderer.start { main.post { rendererReady = true; maybeBind() } }
         cam.init { providerReady = true; maybeBind() }
 
@@ -230,16 +261,21 @@ class MainActivity : AppCompatActivity() {
             }
         })
 
+        b.overlay.corner = dp(22f).toFloat()
+        b.vfControls.visibility = View.INVISIBLE
+        b.thumb.clipToOutline = true
+        setupInsets()
         renderer.onHistogram = { bins -> main.post { b.overlay.setHistogram(bins) } }
-        buildStyleStrip()
         setupControls()
-        setupAssist()
         setupPro()
-        setupColor()
-        setupCreative()
+        setupFilter()
+        setupSettings()
         setupEditor()
         onBackPressedDispatcher.addCallback(this, backCb)
         cam.onBindFallback = { main.post { showToast("这个格式/防抖组合不支持，已回退 1080p 30") } }
+        lutId?.let { id -> if (lutLib.entries().none { it.id == id }) lutId = null else loadLut(id) }
+        applyRatio()
+        setUiMode(UiMode.values().getOrElse(prefs.getInt("uimode", 0)) { UiMode.PHOTO }, quiet = true)
         main.post(uiTicker)
         setupGestures()
         refreshUi()
@@ -249,6 +285,23 @@ class MainActivity : AppCompatActivity() {
             permLauncher.launch(needed)
         }
     }
+
+    private fun setupInsets() {
+        b.topBar.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ -> renderer.topInset = v.bottom + dp(6f) }
+        ViewCompat.setOnApplyWindowInsetsListener(b.root) { _, insets ->
+            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+            b.topBar.setPadding(b.topBar.paddingLeft, bars.top + dp(12f), b.topBar.paddingRight, b.topBar.paddingBottom)
+            b.bottomPanel.setPadding(0, 0, 0, bars.bottom + dp(10f))
+            b.settingsHeader.setPadding(0, bars.top + dp(6f), 0, 0)
+            b.editHeader.setPadding(0, bars.top + dp(6f), 0, 0)
+            b.editBottom.setPadding(0, dp(8f), 0, bars.bottom + dp(12f))
+            b.filterSheet.setPadding(0, dp(14f), 0, bars.bottom + dp(18f))
+            (b.sheet.layoutParams as FrameLayout.LayoutParams).bottomMargin = bars.bottom + dp(28f)
+            b.sheet.requestLayout()
+            insets
+        }
+    }
+
 
     private val orientationListener by lazy {
         object : OrientationEventListener(this) {
@@ -269,7 +322,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun rotateIcons(o: Int) {
         val r = -o.toFloat()
-        listOf<View>(b.thumb, b.btnFlip, b.countdown).forEach { it.animate().rotation(if (r < -180) r + 360 else r).setDuration(200).start() }
+        val target = if (r < -180) r + 360 else r
+        listOf<View>(b.thumb, b.btnMode, b.btnFlash, b.btnSettings, b.countdown, b.btnQuick, b.btnAuto, b.filterIcon).forEach { it.animate().rotation(target).setDuration(200).start() }
     }
 
     override fun onResume() {
@@ -314,21 +368,15 @@ class MainActivity : AppCompatActivity() {
 
     private fun dp(v: Float) = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v, resources.displayMetrics).toInt()
 
-    private fun buildStyleStrip() {
-        for (s in Styles.all) {
-            val tv = TextView(this).apply {
-                text = s.name
-                setTextColor(0xFFFFFFFF.toInt())
-                textSize = 13f
-                gravity = android.view.Gravity.CENTER
-                setBackgroundResource(R.drawable.chip_bg)
-                setPadding(dp(14f), 0, dp(14f), 0)
-                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(34f)).apply { marginEnd = dp(8f) }
-                setOnClickListener { selectStyle(s.id); it.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK) }
-            }
-            styleViews += tv
-            b.styleStrip.addView(tv)
-        }
+    private fun idle() = recorder == null && !renderer.accumulating && liveRec == null && !busy
+
+    private fun syncBack() {
+        backCb.isEnabled = b.editor.visibility == View.VISIBLE || b.settings.visibility == View.VISIBLE || sheet != Sheet.NONE || activeParam != null
+    }
+
+    private fun setThumb(bmp: Bitmap) {
+        b.thumb.setPadding(0, 0, 0, 0)
+        b.thumb.setImageBitmap(bmp)
     }
 
     private fun selectStyle(id: Int) {
@@ -338,7 +386,6 @@ class MainActivity : AppCompatActivity() {
         applyFx()
         refreshUi()
         savePrefs()
-        showToast(s.name)
     }
 
     private fun applyFx() = fxInto(params, grainOn, vignetteOn, leakOn, intensities[intensityIdx])
@@ -352,26 +399,41 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupControls() {
-        b.fxGrain.setOnClickListener { grainOn = !grainOn; applyFx(); refreshUi(); savePrefs() }
-        b.fxVignette.setOnClickListener { vignetteOn = !vignetteOn; applyFx(); refreshUi(); savePrefs() }
-        b.fxLeak.setOnClickListener { leakOn = !leakOn; applyFx(); refreshUi(); savePrefs() }
-        b.fxIntensity.setOnClickListener { intensityIdx = (intensityIdx + 1) % intensities.size; applyFx(); refreshUi(); savePrefs() }
-        b.btnDate.setOnClickListener { params.dateStamp = !params.dateStamp; refreshUi(); savePrefs() }
-        b.btnTimer.setOnClickListener { timerIdx = (timerIdx + 1) % timers.size; refreshUi() }
         b.btnFlash.setOnClickListener {
             flashIdx = if (cam.mode == Mode.VIDEO) (if (flashIdx == 0) 1 else 0) else (flashIdx + 1) % 3
             cam.imageCapture?.flashMode = captureFlashMode()
             if (cam.mode == Mode.VIDEO) cam.setTorch(flashIdx == 1)
             refreshUi()
+            showToast(when (flashIdx) { 1 -> if (cam.mode == Mode.VIDEO) "补光灯 开" else "闪光灯 开"; 2 -> "闪光灯 自动"; else -> "闪光灯 关" })
         }
-        b.modePhoto.setOnClickListener { switchMode(Mode.PHOTO) }
-        b.modeVideo.setOnClickListener { switchMode(Mode.VIDEO) }
-        b.btnFlip.setOnClickListener {
-            if (recorder != null) return@setOnClickListener
-            cam.manual.reset()
-            cam.lensFacing = if (cam.lensFacing == CameraSelector.LENS_FACING_BACK) CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
+        b.btnFormat.setOnClickListener {
+            if (!idle()) return@setOnClickListener
+            if (cam.mode == Mode.VIDEO) { cycleFormat(); return@setOnClickListener }
+            if (cam.caps?.rawSupported != true) { showToast("这颗镜头不支持 RAW"); return@setOnClickListener }
+            cam.rawRequested = !cam.rawRequested
+            showToast(if (cam.rawRequested) "RAW：保存 DNG 原片，不套滤镜" else "JPG：带滤镜和水印")
+            refreshUi()
             maybeBind()
         }
+        b.btnRatio.setOnClickListener {
+            if (!idle()) return@setOnClickListener
+            if (cam.mode == Mode.PHOTO) photoRatioIdx = (photoRatioIdx + 1) % photoRatios.size
+            else videoRatioIdx = (videoRatioIdx + 1) % videoRatios.size
+            applyRatio(); refreshUi(); savePrefs()
+        }
+        b.btnFlip.setOnClickListener {
+            if (!idle()) return@setOnClickListener
+            cam.manual.reset()
+            activeParam = null
+            cam.lensFacing = if (cam.lensFacing == CameraSelector.LENS_FACING_BACK) CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
+            b.btnFlip.animate().rotationBy(180f).setDuration(250).start()
+            zoomKey = ""
+            maybeBind()
+        }
+        b.btnMode.setOnClickListener { if (idle()) openSheet(Sheet.MODE) }
+        b.btnQuick.setOnClickListener { openSheet(Sheet.QUICK) }
+        b.btnFilter.setOnClickListener { openSheet(Sheet.FILTER, catOfStyle(params.style)) }
+        b.scrim.setOnClickListener { closeSheet() }
         b.shutter.setOnClickListener { onShutter() }
         b.thumb.setOnClickListener { openLast() }
         b.thumb.setOnLongClickListener {
@@ -381,76 +443,72 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun switchMode(m: Mode) {
-        if (recorder != null || cam.mode == m) return
-        cam.mode = m
-        clearMulti()
-        cam.hiResPreview = m == Mode.PHOTO && creative in ACCUM_MODES
-        buildCreative()
-        if (m == Mode.VIDEO && flashIdx == 2) flashIdx = 0
-        if (m == Mode.VIDEO && (cam.manual.exposureNs ?: 0L) > 33_333_333L) cam.manual.exposureNs = null
-        applyRatio()
-        applyColor()
-        refreshUi()
+    private fun cycleFormat() {
+        if (recorder != null || cam.mode != Mode.VIDEO) return
+        val list = cam.caps?.videoFormats ?: return
+        if (list.size <= 1) { showToast("这颗镜头只支持 1080p 30"); return }
+        val cur = cam.boundFormat ?: cam.videoFormat
+        val i = list.indexOfFirst { it.w == cur?.w && it.h == cur?.h && it.fps == cur?.fps }
+        val next = list[(i + 1) % list.size]
+        cam.videoFormat = next
+        val codec = Encoders.choose(next.w, next.h, next.fps)
+        showToast(next.label + (codec?.let { " · " + it.label + " " + it.bitrate / 1_000_000 + " Mbps" } ?: ""))
+        savePrefs()
         maybeBind()
+        refreshUi()
+    }
+
+    private fun toggleStab() {
+        if (cam.mode != Mode.VIDEO) { showToast("防抖用于录像"); return }
+        if (recorder != null) return
+        cam.stabRequested = !cam.stabRequested
+        savePrefs()
+        maybeBind()
+        main.postDelayed({
+            showToast(when (cam.stabActive) {
+                Stab.PREVIEW -> "防抖 开（预览级电子防抖）"
+                Stab.VIDEO_EIS -> "防抖 开（电子防抖）"
+                Stab.OIS_ONLY -> "仅光学防抖，这颗镜头没有电子防抖"
+                Stab.OFF -> if (cam.stabRequested) "这颗镜头不支持防抖" else "防抖 关"
+            })
+            refreshUi()
+        }, 400)
+    }
+
+    private fun setLevel(on: Boolean) {
+        levelOn = on
+        if (on) startLevel() else sensorManager.unregisterListener(levelListener)
+        savePrefs()
     }
 
     private fun refreshUi() {
-        for ((i, v) in styleViews.withIndex()) v.isSelected = Styles.all[i].id == params.style
-        b.fxGrain.isSelected = grainOn
-        b.fxVignette.isSelected = vignetteOn
-        b.fxLeak.isSelected = leakOn
-        b.fxIntensity.text = "强度 ${(intensities[intensityIdx] * 100).toInt()}%"
-        b.btnDate.text = if (params.dateStamp) "日期 开" else "日期 关"
-        b.btnTimer.text = if (timers[timerIdx] == 0) "定时 关" else "定时 ${timers[timerIdx]}s"
-        b.btnFlash.text = when (flashIdx) { 1 -> "闪光 开"; 2 -> "闪光 自动"; else -> "闪光 关" }
         val photo = cam.mode == Mode.PHOTO
-        b.btnRatio.text = if (photo) photoRatios[photoRatioIdx].label + (if (cam.rawActive) " RAW" else "") else videoRatios[videoRatioIdx].label
-        b.btnFormat.visibility = if (photo) View.GONE else View.VISIBLE
-        b.btnFormat.text = (cam.boundFormat ?: cam.videoFormat)?.label ?: "1080p 30"
-        b.asStab.alpha = if (photo) 0.4f else 1f
-        b.asStab.isSelected = !photo && cam.stabRequested
-        b.asStab.text = if (cam.stabRequested) "防抖 开" else "防抖 关"
-        b.colorPanel.visibility = if (tab == 2) View.VISIBLE else View.GONE
-        b.creativePanel.visibility = if (tab == 3) View.VISIBLE else View.GONE
-        b.tabCreative.setTextColor(if (tab == 3) 0xFFFFB547.toInt() else 0x99FFFFFF.toInt())
-        b.borderScroll.visibility = if (photo) View.VISIBLE else View.GONE
-        updateHud()
-        b.tabColor.setTextColor(if (tab == 2) 0xFFFFB547.toInt() else 0x99FFFFFF.toInt())
-        for (v in listOf(b.colLog, b.colConvert, b.colBurn)) v.visibility = if (photo) View.GONE else View.VISIBLE
-        b.colConvert.visibility = if (!photo && profileLog) View.VISIBLE else View.GONE
-        b.colLog.isSelected = profileLog
-        b.colLog.text = if (!profileLog) "Log 关" else if (cam.logHardware) "Log 开" else "Log 开(模拟)"
-        b.colConvert.isSelected = convertOn
-        b.colConvert.text = if (convertOn) "内置转换 开" else "内置转换 关"
-        b.colBurn.isSelected = burnIn
-        b.colBurn.text = if (burnIn) "烧录 开" else "烧录 关(录原始)"
-        for ((id, v) in lutViews) v.isSelected = id == lutId
-        b.lutLabel.text = "LUT ${lutStrength}%"
-        b.lutSeek.isEnabled = lutId != null
-        b.lutSeek.alpha = if (lutId != null) 1f else 0.4f
-        b.assistPanel.visibility = if (assistOpen) View.VISIBLE else View.GONE
-        b.btnAssist.text = if (assistOpen) "辅助 ▴" else "辅助 ▾"
-        b.asGrid.isSelected = gridOn
-        b.asLevel.isSelected = levelOn
-        b.asHist.isSelected = histOn
-        b.asPeak.isSelected = peakOn
-        b.asZebra.isSelected = zebraOn
-        b.asRaw.isSelected = cam.rawRequested
-        b.asRaw.alpha = if (photo) 1f else 0.4f
+        b.btnFormat.text = if (photo) (if (cam.rawRequested) "RAW" else "JPG") else ((cam.boundFormat ?: cam.videoFormat)?.label ?: "1080p 30")
+        b.btnFormat.setTextColor(if (photo && cam.rawRequested) ACCENT else WHITE)
+        b.btnRatio.text = if (photo) photoRatios[photoRatioIdx].label else videoRatios[videoRatioIdx].label
+        b.btnFlash.setImageResource(when (flashIdx) { 1 -> R.drawable.ic_flash_on; 2 -> R.drawable.ic_flash_auto; else -> R.drawable.ic_flash_off })
+        b.btnFlash.setColorFilter(if (flashIdx == 1) ACCENT else WHITE)
+        b.btnMode.setImageResource(uiMode.icon)
+        b.btnMode.setColorFilter(if (uiMode == UiMode.PHOTO || uiMode == UiMode.VIDEO) WHITE else ACCENT)
+        val st = Styles.all.first { it.id == params.style }
+        val lutName = lutId?.let { id -> lutLib.entries().firstOrNull { it.id == id }?.name }
+        b.filterLabel.text = when {
+            params.style == 0 && lutName == null -> "原图"
+            params.style == 0 -> lutName
+            lutName != null -> st.name + "+LUT"
+            else -> st.name
+        }
+        b.filterIcon.setColorFilter(if (params.style != 0 || lutId != null) ACCENT else WHITE)
         b.overlay.grid = gridOn
         b.overlay.level = levelOn
         b.overlay.showHistogram = histOn
         renderer.peaking = peakOn
         renderer.zebra = zebraOn
         renderer.histogram = histOn
-        b.tabFx.setTextColor(if (tab == 0) 0xFFFFB547.toInt() else 0x99FFFFFF.toInt())
-        b.tabPro.setTextColor(if (proTab) 0xFFFFB547.toInt() else 0x99FFFFFF.toInt())
-        b.fxRow.visibility = if (tab == 0) View.VISIBLE else View.GONE
-        b.proRow.visibility = if (proTab) View.VISIBLE else View.GONE
-        b.sliderRow.visibility = if (proTab && activeParam != null) View.VISIBLE else View.GONE
-        b.modePhoto.setTextColor(if (photo) 0xFFFFB547.toInt() else 0x99FFFFFF.toInt())
-        b.modeVideo.setTextColor(if (!photo) 0xFFFFB547.toInt() else 0x99FFFFFF.toInt())
+        val running = recorder != null || renderer.accumulating || liveRec != null
+        b.sliderRow.visibility = if (activeParam != null) View.VISIBLE else View.GONE
+        b.optScroll.visibility = if (b.optStrip.childCount > 0 && !running) View.VISIBLE else View.GONE
+        for (v in listOf<View>(b.thumb, b.btnMode, b.btnFlip, b.btnFilter, b.btnFormat, b.btnRatio, b.btnSettings)) v.alpha = if (running) 0.3f else 1f
         b.shutter.setImageResource(
             when {
                 recorder != null || renderer.accumulating -> R.drawable.shutter_recording
@@ -458,6 +516,11 @@ class MainActivity : AppCompatActivity() {
                 else -> R.drawable.shutter_video
             }
         )
+        updateHud()
+        refreshPro()
+        if (sheet == Sheet.QUICK) buildQuick()
+        if (sheet == Sheet.FILTER) refreshFilterFx()
+        syncBack()
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -468,14 +531,27 @@ class MainActivity : AppCompatActivity() {
                 return true
             }
         })
+        var downX = 0f; var downY = 0f; var scaled = false
         b.preview.setOnTouchListener { _, e ->
             scale.onTouchEvent(e)
-            if (e.actionMasked == MotionEvent.ACTION_UP && !scale.isInProgress && e.eventTime - e.downTime < 250) {
-                val r = renderer.previewRect
-                if (r.width() > 0 && r.contains(e.x, e.y)) {
-                    val (fx, fy) = renderer.toFullContent((e.x - r.left) / r.width(), (e.y - r.top) / r.height())
-                    cam.focusAt(fx, fy)
-                    showFocusRing(e.x, e.y)
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> { downX = e.x; downY = e.y; scaled = false }
+                MotionEvent.ACTION_POINTER_DOWN -> scaled = true
+                MotionEvent.ACTION_UP -> {
+                    val dx = e.x - downX; val dy = e.y - downY
+                    if (!scaled && !scale.isInProgress && kotlin.math.abs(dx) > dp(70f) && kotlin.math.abs(dx) > kotlin.math.abs(dy) * 1.5f) {
+                        // swipe left → video, swipe right → photo
+                        if (dx < 0 && cam.mode == Mode.PHOTO) setUiMode(UiMode.VIDEO)
+                        else if (dx > 0 && cam.mode == Mode.VIDEO) setUiMode(UiMode.PHOTO)
+                    } else if (!scaled && !scale.isInProgress && e.eventTime - e.downTime < 300 && kotlin.math.abs(dx) < dp(12f) && kotlin.math.abs(dy) < dp(12f)) {
+                        if (activeParam != null) { activeParam = null; refreshUi() }
+                        val r = renderer.previewRect
+                        if (r.width() > 0 && r.contains(e.x, e.y)) {
+                            val (fx, fy) = renderer.toFullContent((e.x - r.left) / r.width(), (e.y - r.top) / r.height())
+                            cam.focusAt(fx, fy)
+                            showFocusRing(e.x, e.y)
+                        }
+                    }
                 }
             }
             true
@@ -483,18 +559,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showFocusRing(x: Float, y: Float) {
-        val ring = TextView(this).apply {
-            text = "◻"
-            setTextColor(0xFFFFB547.toInt())
-            textSize = 48f
+        val size = dp(64f)
+        val ring = View(this).apply {
+            background = GradientDrawable().apply { shape = GradientDrawable.RECTANGLE; cornerRadius = dp(6f).toFloat(); setStroke(dp(1.5f), 0xFFFFD54F.toInt()) }
+            layoutParams = FrameLayout.LayoutParams(size, size)
         }
-        b.root.addView(ring)
-        ring.post {
-            ring.x = x - ring.width / 2f
-            ring.y = y - ring.height / 2f
-            ring.animate().scaleX(0.8f).scaleY(0.8f).alpha(0f).setStartDelay(600).setDuration(400)
-                .withEndAction { b.root.removeView(ring) }.start()
-        }
+        b.root.addView(ring, b.root.indexOfChild(b.hudCol))
+        ring.x = x - size / 2f
+        ring.y = y - size / 2f
+        ring.scaleX = 1.4f; ring.scaleY = 1.4f
+        ring.animate().scaleX(1f).scaleY(1f).setDuration(180).withEndAction {
+            ring.animate().alpha(0f).setStartDelay(700).setDuration(300).withEndAction { b.root.removeView(ring) }.start()
+        }.start()
     }
 
     private fun showToast(msg: String) {
@@ -502,8 +578,590 @@ class MainActivity : AppCompatActivity() {
         b.toast.visibility = View.VISIBLE
         b.toast.alpha = 1f
         b.toast.animate().cancel()
-        b.toast.animate().alpha(0f).setStartDelay(700).setDuration(300).withEndAction { b.toast.visibility = View.GONE }.start()
+        b.toast.animate().alpha(0f).setStartDelay(1100).setDuration(300).withEndAction { b.toast.visibility = View.GONE }.start()
     }
+
+    // ---------------- modes ----------------
+
+    private fun setUiMode(m: UiMode, quiet: Boolean = false) {
+        if (recorder != null || busy || renderer.accumulating || liveRec != null) return
+        val changed = m != uiMode
+        uiMode = m
+        val newCreative = when (m) {
+            UiMode.SLOW -> Creative.SLOW; UiMode.BLUR -> Creative.BLUR; UiMode.LIGHT -> Creative.LIGHT
+            UiMode.MULTI -> Creative.MULTI; UiMode.LIVE -> Creative.LIVE; else -> Creative.NORMAL
+        }
+        if (newCreative != Creative.MULTI) clearMulti()
+        creative = newCreative
+        val camMode = if (m == UiMode.VIDEO || m == UiMode.TIMELAPSE) Mode.VIDEO else Mode.PHOTO
+        var rebind = false
+        if (cam.mode != camMode) {
+            cam.mode = camMode
+            if (camMode == Mode.VIDEO && flashIdx == 2) flashIdx = 0
+            if (camMode == Mode.VIDEO && (cam.manual.exposureNs ?: 0L) > 33_333_333L) cam.manual.exposureNs = null
+            activeParam = null
+            applyRatio(); applyColor(); rebind = true
+        }
+        val hi = camMode == Mode.PHOTO && creative in ACCUM_MODES
+        if (cam.hiResPreview != hi) { cam.hiResPreview = hi; rebind = true }
+        if (tlIdx == 0) tlIdx = 2
+        buildOptions()
+        refreshUi()
+        savePrefs()
+        if (rebind) maybeBind()
+        if (!quiet && changed) showToast(when (m) {
+            UiMode.PHOTO -> "拍照"
+            UiMode.VIDEO -> "录像"
+            UiMode.TIMELAPSE -> "延时摄影：按间隔拍一帧，不录声音"
+            UiMode.SLOW -> "慢快门：手机放稳，移动的东西拖出轨迹"
+            UiMode.BLUR -> "运动模糊：适合追拍和车流"
+            UiMode.LIGHT -> "光绘：只留下最亮的光迹，暗处效果最好"
+            UiMode.MULTI -> "多重曝光：拍两张，自动叠在一起"
+            UiMode.LIVE -> "动态照片：记录按快门前后约 1 秒"
+        })
+    }
+
+    private fun vfChip(label: String, selected: Boolean, onClick: () -> Unit) {
+        val tv = TextView(this).apply {
+            text = label
+            setTextColor(WHITE)
+            textSize = 13f
+            gravity = Gravity.CENTER
+            setBackgroundResource(R.drawable.vf_chip_bg)
+            setPadding(dp(14f), 0, dp(14f), 0)
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(32f)).apply { marginEnd = dp(8f) }
+            isSelected = selected
+            setOnClickListener { it.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK); onClick() }
+        }
+        b.optStrip.addView(tv)
+    }
+
+    private fun buildOptions() {
+        b.optStrip.removeAllViews()
+        when (uiMode) {
+            UiMode.SLOW -> slowSecs.forEachIndexed { i, v -> vfChip(secsLabel(v), i == slowIdx) { slowIdx = i; savePrefs(); buildOptions(); updateHud() } }
+            UiMode.BLUR -> blurSecs.forEachIndexed { i, v -> vfChip(secsLabel(v), i == blurIdx) { blurIdx = i; savePrefs(); buildOptions(); updateHud() } }
+            UiMode.LIGHT -> lightSecs.forEachIndexed { i, v -> vfChip(secsLabel(v), i == lightIdx) { lightIdx = i; savePrefs(); buildOptions(); updateHud() } }
+            UiMode.MULTI -> {
+                vfChip("变亮叠加", multiScreen) { multiScreen = true; buildOptions() }
+                vfChip("平均", !multiScreen) { multiScreen = false; buildOptions() }
+                if (multiFirst != null) vfChip("重拍第一张", false) { clearMulti(); buildOptions(); updateHud() }
+            }
+            UiMode.TIMELAPSE -> tlIntervals.forEachIndexed { i, v ->
+                if (i > 0) vfChip("每 " + (if (v < 1f) "0.5" else v.toInt().toString()) + " 秒", i == tlIdx) {
+                    if (recorder == null) { tlIdx = i; savePrefs(); buildOptions(); updateHud() }
+                }
+            }
+            else -> {}
+        }
+        b.optScroll.visibility = if (b.optStrip.childCount > 0) View.VISIBLE else View.GONE
+    }
+
+    // ---------------- sheets ----------------
+
+    private fun openSheet(s: Sheet, cat: Int = -1) {
+        if (s == sheet) { closeSheet(); return }
+        sheet = s
+        activeParam = null
+        val v: View = if (s == Sheet.FILTER) b.filterSheet else b.sheet
+        b.sheet.visibility = if (v === b.sheet) View.VISIBLE else View.GONE
+        b.filterSheet.visibility = if (v === b.filterSheet) View.VISIBLE else View.GONE
+        b.scrim.visibility = View.VISIBLE
+        when (s) {
+            Sheet.QUICK -> buildQuick()
+            Sheet.MODE -> buildModes()
+            Sheet.FILTER -> { if (cat >= 0) filterCat = cat; buildFilter() }
+            Sheet.NONE -> {}
+        }
+        v.alpha = 0f
+        v.translationY = dp(40f).toFloat()
+        v.animate().alpha(1f).translationY(0f).setDuration(180).start()
+        refreshUi()
+    }
+
+    private fun closeSheet() {
+        if (sheet == Sheet.NONE) return
+        sheet = Sheet.NONE
+        b.sheet.visibility = View.GONE
+        b.filterSheet.visibility = View.GONE
+        b.scrim.visibility = View.GONE
+        syncBack()
+    }
+
+    private class GItem(val label: String, val icon: Int, val value: String?, val on: Boolean, val click: () -> Unit)
+
+    private fun buildGrid(title: String?, items: List<GItem>, cols: Int = 4) {
+        b.sheetTitle.text = title ?: ""
+        b.sheetTitle.visibility = if (title == null) View.GONE else View.VISIBLE
+        b.sheetGrid.removeAllViews()
+        var row: LinearLayout? = null
+        items.forEachIndexed { i, g ->
+            if (i % cols == 0) {
+                row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = if (i == 0) 0 else dp(16f) }
+                }
+                b.sheetGrid.addView(row)
+            }
+            val cell = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_HORIZONTAL
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            val circle = FrameLayout(this).apply {
+                setBackgroundResource(R.drawable.qring)
+                isSelected = g.on
+                layoutParams = LinearLayout.LayoutParams(dp(56f), dp(56f))
+            }
+            if (g.value != null) circle.addView(TextView(this).apply {
+                text = g.value; gravity = Gravity.CENTER; setTextColor(WHITE); textSize = 13f; typeface = Typeface.DEFAULT_BOLD
+                layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+            }) else circle.addView(ImageView(this).apply {
+                setImageResource(g.icon)
+                layoutParams = FrameLayout.LayoutParams(dp(22f), dp(22f), Gravity.CENTER)
+            })
+            val lab = TextView(this).apply {
+                text = g.label; setTextColor(WHITE); textSize = 13f; gravity = Gravity.CENTER; maxLines = 1
+                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8f) }
+            }
+            cell.addView(circle); cell.addView(lab)
+            cell.setOnClickListener { v -> v.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK); g.click() }
+            row?.addView(cell)
+        }
+        val rem = items.size % cols
+        if (rem != 0) repeat(cols - rem) { row?.addView(View(this).apply { layoutParams = LinearLayout.LayoutParams(0, 1, 1f) }) }
+    }
+
+    private fun buildQuick() {
+        val photo = cam.mode == Mode.PHOTO
+        val items = ArrayList<GItem>()
+        if (photo) items += GItem(if (border == Border.NONE) "水印" else border.label, R.drawable.ic_border, null, border != Border.NONE) {
+            border = Border.values()[(border.ordinal + 1) % Border.values().size]; savePrefs(); buildQuick()
+        }
+        items += GItem("倒计时", R.drawable.ic_timer, if (timers[timerIdx] == 0) null else "${timers[timerIdx]}s", timers[timerIdx] > 0) {
+            timerIdx = (timerIdx + 1) % timers.size; buildQuick()
+        }
+        items += GItem("参考线", R.drawable.ic_grid, null, gridOn) { gridOn = !gridOn; savePrefs(); refreshUi() }
+        items += GItem("直方图", R.drawable.ic_hist, null, histOn) { histOn = !histOn; savePrefs(); refreshUi() }
+        items += GItem("峰值", R.drawable.ic_peak, null, peakOn) { peakOn = !peakOn; savePrefs(); refreshUi() }
+        items += GItem("水平仪", R.drawable.ic_level, null, levelOn) { setLevel(!levelOn); refreshUi() }
+        items += GItem("斑马纹", R.drawable.ic_zebra, null, zebraOn) { zebraOn = !zebraOn; savePrefs(); refreshUi() }
+        items += GItem("日期", R.drawable.ic_date, null, params.dateStamp) { params.dateStamp = !params.dateStamp; savePrefs(); refreshUi() }
+        if (!photo) items += GItem("防抖", R.drawable.ic_stab, null, cam.stabRequested) { toggleStab(); main.postDelayed({ if (sheet == Sheet.QUICK) buildQuick() }, 450) }
+        buildGrid(null, items)
+    }
+
+    private fun buildModes() {
+        val items = UiMode.values().map { m -> GItem(m.label, m.icon, null, m == uiMode) { closeSheet(); setUiMode(m) } } +
+            GItem("编辑照片", R.drawable.ic_edit, null, false) {
+                closeSheet(); pickPhoto.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+            }
+        buildGrid("拍摄模式", items)
+    }
+
+    // ---------------- filter sheet ----------------
+
+    private val CATS = listOf("胶片", "复古", "黑白", "LUT")
+    private val catStyles = listOf(listOf(3, 4, 5, 6, 9), listOf(1, 2, 8), listOf(7), emptyList())
+    private val LUT_CAT = 3
+    private class Tile(val c1: Int, val c2: Int, val badge: String)
+    private val styleTiles = mapOf(
+        0 to Tile(0xFF4A4A4A.toInt(), 0xFF262626.toInt(), "原"),
+        1 to Tile(0xFF3B6FE0.toInt(), 0xFF14306E.toInt(), "DV"),
+        2 to Tile(0xFF9B59B6.toInt(), 0xFF4A235A.toInt(), "CCD"),
+        3 to Tile(0xFFF5B78E.toInt(), 0xFFB0603A.toInt(), "160"),
+        4 to Tile(0xFFF6C744.toInt(), 0xFFC0392B.toInt(), "200"),
+        5 to Tile(0xFFE67E22.toInt(), 0xFF7E3A0E.toInt(), "400"),
+        6 to Tile(0xFF3498DB.toInt(), 0xFF1B4F72.toInt(), "E6"),
+        7 to Tile(0xFF9A9A9A.toInt(), 0xFF1E1E1E.toInt(), "BW"),
+        8 to Tile(0xFF1ABC9C.toInt(), 0xFF0E5E4E.toInt(), "VHS"),
+        9 to Tile(0xFFE74C3C.toInt(), 0xFF6E1B12.toInt(), "S8"),
+    )
+    private val lutPalette = intArrayOf(0xFF16A085.toInt(), 0xFF8E44AD.toInt(), 0xFF2C3E50.toInt(), 0xFFD35400.toInt(), 0xFF27AE60.toInt(), 0xFF2980B9.toInt(), 0xFFC0392B.toInt())
+
+    private fun lutTile(name: String): Tile {
+        val c = lutPalette[(name.hashCode() and 0x7fffffff) % lutPalette.size]
+        val badge = name.filter { it.isLetterOrDigit() }.take(3).uppercase().ifEmpty { "LUT" }
+        return Tile(c, 0xFF141414.toInt(), badge)
+    }
+
+    private fun catOfStyle(id: Int): Int {
+        if (id == 0 && lutId != null) return LUT_CAT
+        val i = catStyles.indexOfFirst { id in it }
+        return if (i >= 0) i else 0
+    }
+
+    private fun setupFilter() {
+        b.fxGrain.setOnClickListener { grainOn = !grainOn; applyFx(); refreshUi(); savePrefs() }
+        b.fxVignette.setOnClickListener { vignetteOn = !vignetteOn; applyFx(); refreshUi(); savePrefs() }
+        b.fxLeak.setOnClickListener { leakOn = !leakOn; applyFx(); refreshUi(); savePrefs() }
+        b.fxIntensity.setOnClickListener { intensityIdx = (intensityIdx + 1) % intensities.size; applyFx(); refreshUi(); savePrefs() }
+        b.lutSeek.progress = lutStrength
+        b.lutSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar, progress: Int, fromUser: Boolean) {
+                if (!fromUser) return
+                lutStrength = progress
+                applyColor()
+                b.lutLabel.text = "强度 ${lutStrength}%"
+            }
+            override fun onStartTrackingTouch(sb: SeekBar) {}
+            override fun onStopTrackingTouch(sb: SeekBar) { savePrefs() }
+        })
+    }
+
+    private fun tile(parent: LinearLayout, name: String, t: Tile, selected: Boolean, onLong: (() -> Unit)? = null, onClick: () -> Unit) {
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(dp(78f), LinearLayout.LayoutParams.WRAP_CONTENT)
+        }
+        val can = FrameLayout(this).apply {
+            background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(t.c1, t.c2)).apply {
+                cornerRadius = dp(12f).toFloat()
+                if (selected) setStroke(dp(2.5f), ACCENT)
+            }
+            layoutParams = LinearLayout.LayoutParams(dp(60f), dp(74f))
+        }
+        can.addView(View(this).apply {
+            setBackgroundColor(0x33000000)
+            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, dp(12f), Gravity.TOP).apply { topMargin = dp(8f) }
+        })
+        can.addView(TextView(this).apply {
+            text = t.badge; setTextColor(WHITE); textSize = 15f; typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER
+            setShadowLayer(4f, 0f, 1f, 0x80000000.toInt())
+            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+        })
+        val lab = TextView(this).apply {
+            text = name; setTextColor(if (selected) ACCENT else WHITE); textSize = 12f; gravity = Gravity.CENTER; maxLines = 2
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(6f) }
+        }
+        col.addView(can); col.addView(lab)
+        col.setOnClickListener { it.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK); onClick() }
+        if (onLong != null) col.setOnLongClickListener { onLong(); true }
+        parent.addView(col)
+    }
+
+    private fun buildFilter() {
+        b.catStrip.removeAllViews()
+        val none = FrameLayout(this).apply {
+            setBackgroundResource(R.drawable.cat_pill)
+            isSelected = params.style == 0 && lutId == null
+            layoutParams = LinearLayout.LayoutParams(dp(48f), dp(42f)).apply { marginEnd = dp(8f) }
+            addView(ImageView(this@MainActivity).apply { setImageResource(R.drawable.ic_none); layoutParams = FrameLayout.LayoutParams(dp(22f), dp(22f), Gravity.CENTER) })
+            setOnClickListener { selectStyle(0); selectLut(null); buildFilter() }
+        }
+        b.catStrip.addView(none)
+        CATS.forEachIndexed { i, name ->
+            b.catStrip.addView(TextView(this).apply {
+                text = name; setTextColor(WHITE); textSize = 16f; typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER
+                setBackgroundResource(R.drawable.cat_pill)
+                isSelected = filterCat == i
+                setPadding(dp(24f), 0, dp(24f), 0)
+                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(42f)).apply { marginEnd = dp(8f) }
+                setOnClickListener { filterCat = i; buildFilter() }
+            })
+        }
+        b.tileStrip.removeAllViews()
+        if (filterCat == LUT_CAT) {
+            for (e in lutLib.entries()) {
+                val del: (() -> Unit)? = if (e.builtin) null else ({
+                    androidx.appcompat.app.AlertDialog.Builder(this)
+                        .setTitle("删除 LUT")
+                        .setMessage("删除「${e.name}」？")
+                        .setPositiveButton("删除") { _, _ ->
+                            lutLib.delete(e.id)
+                            if (lutId == e.id) selectLut(null)
+                            buildFilter(); refreshUi()
+                        }
+                        .setNegativeButton("取消", null)
+                        .show()
+                })
+                tile(b.tileStrip, e.name, lutTile(e.name), lutId == e.id, del) { selectLut(if (lutId == e.id) null else e.id); buildFilter() }
+            }
+            tile(b.tileStrip, "导入 .cube", Tile(0xFF2E2E2E.toInt(), 0xFF1A1A1A.toInt(), "＋"), false) { importLut.launch(arrayOf("*/*")) }
+        } else {
+            for (id in catStyles[filterCat]) {
+                val s = Styles.all.first { it.id == id }
+                tile(b.tileStrip, s.name, styleTiles[id]!!, params.style == id) { selectStyle(id); buildFilter() }
+            }
+        }
+        b.fxScroll.visibility = if (filterCat == LUT_CAT) View.GONE else View.VISIBLE
+        b.lutRow.visibility = if (filterCat == LUT_CAT) View.VISIBLE else View.GONE
+        refreshFilterFx()
+    }
+
+    private fun refreshFilterFx() {
+        b.fxGrain.isSelected = grainOn
+        b.fxVignette.isSelected = vignetteOn
+        b.fxLeak.isSelected = leakOn
+        b.fxIntensity.text = "强度 ${(intensities[intensityIdx] * 100).toInt()}%"
+        b.lutLabel.text = "强度 ${lutStrength}%"
+        b.lutSeek.progress = lutStrength
+        b.lutSeek.isEnabled = lutId != null
+        b.lutSeek.alpha = if (lutId != null) 1f else 0.4f
+    }
+
+    // ---------------- settings page ----------------
+
+    private val settingsTabs = listOf("通用", "视频", "辅助", "关于")
+
+    private fun setupSettings() {
+        b.btnSettings.setOnClickListener { if (idle()) openSettings() }
+        b.settingsBack.setOnClickListener { closeSettings() }
+        settingsTabs.forEachIndexed { i, t ->
+            b.segBar.addView(TextView(this).apply {
+                text = t; gravity = Gravity.CENTER; setTextColor(WHITE); textSize = 15f
+                setBackgroundResource(R.drawable.seg_item)
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
+                setOnClickListener { settingsTab = i; buildSettings() }
+            })
+        }
+    }
+
+    private fun openSettings() {
+        closeSheet()
+        b.settings.visibility = View.VISIBLE
+        buildSettings()
+        syncBack()
+    }
+
+    private fun closeSettings() {
+        b.settings.visibility = View.GONE
+        syncBack()
+        refreshUi()
+    }
+
+    private fun section(title: String) {
+        b.settingsList.addView(TextView(this).apply {
+            text = title; setTextColor(GREY); textSize = 14f
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(22f); bottomMargin = dp(10f); marginStart = dp(6f)
+            }
+        })
+    }
+
+    private fun card(build: (LinearLayout) -> Unit) {
+        val c = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundResource(R.drawable.card_bg)
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        }
+        build(c)
+        b.settingsList.addView(c)
+    }
+
+    private fun rowBase(card: LinearLayout, icon: Int, title: String, sub: String?): LinearLayout {
+        if (card.childCount > 0) card.addView(View(this).apply {
+            setBackgroundColor(0xFF2A2A2A.toInt())
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 1).apply { marginStart = dp(58f) }
+        })
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(18f), dp(16f), dp(16f), dp(16f))
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        }
+        row.addView(ImageView(this).apply { setImageResource(icon); layoutParams = LinearLayout.LayoutParams(dp(24f), dp(24f)) })
+        val texts = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(16f); marginEnd = dp(12f) }
+        }
+        texts.addView(TextView(this).apply { text = title; setTextColor(WHITE); textSize = 16f; typeface = Typeface.DEFAULT_BOLD })
+        if (!sub.isNullOrEmpty()) texts.addView(TextView(this).apply {
+            text = sub; setTextColor(GREY); textSize = 12f
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(4f) }
+        })
+        row.addView(texts)
+        card.addView(row)
+        return row
+    }
+
+    private fun switchView(on: Boolean): FrameLayout {
+        val track = FrameLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(50f), dp(30f))
+        }
+        val knob = View(this).apply {
+            background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0xFF000000.toInt()) }
+            layoutParams = FrameLayout.LayoutParams(dp(24f), dp(24f), Gravity.CENTER_VERTICAL)
+        }
+        track.addView(knob)
+        setSwitch(track, on)
+        return track
+    }
+
+    private fun setSwitch(track: FrameLayout, on: Boolean) {
+        track.background = GradientDrawable().apply { cornerRadius = dp(15f).toFloat(); setColor(if (on) ACCENT else 0xFF4A4A4A.toInt()) }
+        val knob = track.getChildAt(0)
+        (knob.layoutParams as FrameLayout.LayoutParams).apply { gravity = Gravity.CENTER_VERTICAL or (if (on) Gravity.END else Gravity.START); marginStart = dp(3f); marginEnd = dp(3f) }
+        knob.requestLayout()
+    }
+
+    private fun toggleRow(card: LinearLayout, icon: Int, title: String, sub: String?, on: Boolean, onChange: (Boolean) -> Unit) {
+        val row = rowBase(card, icon, title, sub)
+        val sw = switchView(on)
+        row.addView(sw)
+        var state = on
+        row.setOnClickListener {
+            state = !state
+            setSwitch(sw, state)
+            onChange(state)
+        }
+    }
+
+    private fun valueRow(card: LinearLayout, icon: Int, title: String, value: String, sub: String? = null, onClick: (() -> Unit)?) {
+        val row = rowBase(card, icon, title, sub)
+        row.addView(TextView(this).apply { text = value; setTextColor(GREY); textSize = 14f })
+        if (onClick != null) {
+            row.addView(ImageView(this).apply {
+                setImageResource(R.drawable.ic_chevron_right); setColorFilter(GREY)
+                layoutParams = LinearLayout.LayoutParams(dp(18f), dp(18f)).apply { marginStart = dp(6f) }
+            })
+            row.setOnClickListener { onClick() }
+        }
+    }
+
+    private fun appVersion(): String = try { packageManager.getPackageInfo(packageName, 0).versionName ?: "" } catch (_: Throwable) { "" }
+
+    private fun buildSettings() {
+        for (i in 0 until b.segBar.childCount) b.segBar.getChildAt(i).isSelected = i == settingsTab
+        b.settingsList.removeAllViews()
+        when (settingsTab) {
+            0 -> {
+                section("拍摄")
+                card { c ->
+                    toggleRow(c, R.drawable.ic_date, "日期水印", "照片和视频角落印上拍摄日期", params.dateStamp) { params.dateStamp = it; savePrefs() }
+                    valueRow(c, R.drawable.ic_border, "参数水印边框", border.label, "照片加上相机参数边框") {
+                        border = Border.values()[(border.ordinal + 1) % Border.values().size]; savePrefs(); buildSettings()
+                    }
+                    valueRow(c, R.drawable.ic_timer, "倒计时", if (timers[timerIdx] == 0) "关" else "${timers[timerIdx]} 秒") {
+                        timerIdx = (timerIdx + 1) % timers.size; buildSettings()
+                    }
+                    toggleRow(c, R.drawable.ic_mirror, "镜像前置摄像头", "前置拍照保存成和预览一样的镜像", mirrorFront) { mirrorFront = it; savePrefs() }
+                }
+                section("偏好")
+                card { c ->
+                    toggleRow(c, R.drawable.ic_volume, "音量键快门", "按音量键拍照或开始/停止录像", volShutter) { volShutter = it; savePrefs() }
+                    toggleRow(c, R.drawable.ic_camera, "快门闪黑", "按快门时画面闪一下", shutterBlink) { shutterBlink = it; savePrefs() }
+                }
+            }
+            1 -> {
+                section("视频格式")
+                card { c ->
+                    val fmt = (cam.boundFormat ?: cam.videoFormat)?.label ?: "1080p 30"
+                    valueRow(c, R.drawable.ic_video, "分辨率与帧率", fmt, if (cam.mode == Mode.VIDEO) null else "切到录像模式后可改") {
+                        if (cam.mode == Mode.VIDEO) { cycleFormat(); main.postDelayed({ if (b.settings.visibility == View.VISIBLE) buildSettings() }, 500) } else showToast("先切到录像模式")
+                    }
+                    toggleRow(c, R.drawable.ic_stab, "防抖", "录像时启用电子/光学防抖", cam.stabRequested) {
+                        if (cam.mode == Mode.VIDEO) toggleStab() else { cam.stabRequested = it; savePrefs() }
+                    }
+                    valueRow(c, R.drawable.ic_timelapse, "延时摄影间隔", "每 " + (if (tlIntervals[tlIdx] < 1f) "0.5" else tlIntervals[tlIdx].toInt().toString()) + " 秒") {
+                        if (recorder == null) { tlIdx = if (tlIdx + 1 >= tlIntervals.size) 1 else tlIdx + 1; savePrefs(); buildOptions(); buildSettings() }
+                    }
+                }
+                section("色彩")
+                card { c ->
+                    toggleRow(c, R.drawable.ic_curve, "Log 模式", if (cam.logHardware) "相机输出平坦曲线，曝光自动降 1.5 档" else "录像用；镜头不支持时用软件模拟", profileLog) {
+                        if (recorder == null) {
+                            profileLog = it; cam.logRequested = profileLog; cam.applyManual(); applyColor(); savePrefs()
+                        }
+                    }
+                    toggleRow(c, R.drawable.ic_filter, "预览套用转换", "关掉可直接看 Log 原始画面", convertOn) { convertOn = it; applyColor(); savePrefs() }
+                    toggleRow(c, R.drawable.ic_drop, "LUT 烧录进视频", "关掉则只录原始画面，方便后期调色", burnIn) {
+                        if (recorder == null) { burnIn = it; applyColor(); savePrefs() }
+                    }
+                }
+            }
+            2 -> {
+                section("构图与曝光辅助")
+                card { c ->
+                    toggleRow(c, R.drawable.ic_grid, "参考线", "三分法九宫格", gridOn) { gridOn = it; savePrefs() }
+                    toggleRow(c, R.drawable.ic_level, "水平仪", null, levelOn) { setLevel(it) }
+                    toggleRow(c, R.drawable.ic_hist, "直方图", null, histOn) { histOn = it; savePrefs() }
+                    toggleRow(c, R.drawable.ic_peak, "峰值对焦", "手动对焦时标出合焦边缘", peakOn) { peakOn = it; savePrefs() }
+                    toggleRow(c, R.drawable.ic_zebra, "斑马纹", "标出过曝区域", zebraOn) { zebraOn = it; savePrefs() }
+                }
+            }
+            else -> {
+                section("关于")
+                card { c ->
+                    valueRow(c, R.drawable.ic_info, "RetroCam", "v" + appVersion(), "复古 DV / CCD / 胶片相机", null)
+                    valueRow(c, R.drawable.ic_filter, "导入 LUT", ".cube") { importLut.launch(arrayOf("*/*")) }
+                    valueRow(c, R.drawable.ic_save, "项目主页", "GitHub") {
+                        try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/hq970123/RetroCam"))) } catch (_: Throwable) {}
+                    }
+                }
+            }
+        }
+        b.settingsScroll.scrollTo(0, 0)
+    }
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (volShutter && (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == KeyEvent.KEYCODE_VOLUME_UP) &&
+            b.editor.visibility != View.VISIBLE && b.settings.visibility != View.VISIBLE) {
+            if (event.repeatCount == 0) { closeSheet(); onShutter() }
+            return true
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
+    // ---------------- zoom ----------------
+
+    private val zoomViews = ArrayList<Pair<Float, TextView>>()
+    private var zoomKey = ""
+
+    private fun zoomLabel(z: Float) = if (z < 9.95f) String.format(java.util.Locale.US, "%.1fx", z) else "${Math.round(z)}x"
+
+    private fun buildZoom() {
+        val range = cam.zoomRange() ?: return
+        val stops = ArrayList<Float>()
+        if (range.first < 0.95f) stops += Math.round(range.first * 10f) / 10f
+        stops += 1f
+        for (z in floatArrayOf(2f, 5f, 10f)) if (range.second >= z) stops += z
+        val key = stops.joinToString()
+        if (key == zoomKey) return
+        zoomKey = key
+        b.zoomStrip.removeAllViews(); zoomViews.clear()
+        for (z in stops) {
+            val tv = TextView(this).apply {
+                gravity = Gravity.CENTER; textSize = 12f; setTextColor(WHITE)
+                setBackgroundResource(R.drawable.vf_circ)
+                layoutParams = LinearLayout.LayoutParams(dp(40f), dp(40f)).apply { marginStart = dp(5f); marginEnd = dp(5f) }
+                setOnClickListener {
+                    it.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                    cam.setZoom(if (z == stops.first() && z < 1f) range.first else z)
+                    main.postDelayed({ refreshZoom() }, 120)
+                }
+            }
+            zoomViews += Pair(z, tv)
+            b.zoomStrip.addView(tv)
+        }
+        refreshZoom()
+    }
+
+    private fun refreshZoom() {
+        if (zoomViews.isEmpty()) return
+        val cur = cam.zoomRatio()
+        val active = zoomViews.lastOrNull { it.first <= cur + 0.05f }?.first ?: zoomViews.first().first
+        for ((z, v) in zoomViews) {
+            val on = z == active
+            v.isSelected = on
+            v.text = zoomLabel(if (on) cur else z)
+        }
+    }
+
+    private fun placeVf() {
+        val r = renderer.previewRect
+        if (r.width() <= 0f) return
+        val lp = b.vfControls.layoutParams
+        val w = r.width().toInt()
+        if (lp.width != w) { lp.width = w; b.vfControls.layoutParams = lp }
+        b.vfControls.x = r.left
+        val maxBottom = b.bottomPanel.top.toFloat() - dp(6f)
+        b.vfControls.y = minOf(r.bottom, maxBottom) - b.vfControls.height
+        b.hudCol.y = r.top + dp(14f)
+        if (!vfPlaced && b.vfControls.height > 0) { vfPlaced = true; b.vfControls.visibility = View.VISIBLE }
+    }
+
 
     // ---------------- capture ----------------
 
@@ -555,14 +1213,16 @@ class MainActivity : AppCompatActivity() {
 
     private fun shutterFeedback() {
         b.shutter.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-        b.flashOverlay.alpha = 0.8f
-        b.flashOverlay.animate().alpha(0f).setDuration(250).start()
+        if (shutterBlink) {
+            b.flashOverlay.alpha = 0.85f
+            b.flashOverlay.animate().alpha(0f).setDuration(220).start()
+        }
     }
 
     /** Takes a still and returns it upright and cropped to the photo ratio (unprocessed). Callback on [io]. */
     private fun captureUpright(onResult: (Bitmap?) -> Unit) {
         val ic = cam.imageCapture ?: run { onResult(null); return }
-        val front = cam.lensFacing == CameraSelector.LENS_FACING_FRONT
+        val front = cam.lensFacing == CameraSelector.LENS_FACING_FRONT && mirrorFront
         val ratio = photoRatios[photoRatioIdx].r
         ic.takePicture(io, object : ImageCapture.OnImageCapturedCallback() {
             override fun onCaptureSuccess(image: ImageProxy) {
@@ -619,7 +1279,7 @@ class MainActivity : AppCompatActivity() {
                 main.post {
                     busy = false
                     lastUri = uri; lastIsVideo = false
-                    thumb?.let { b.thumb.setImageBitmap(it) }
+                    thumb?.let { setThumb(it) }
                     showToast(if (uri == null) "保存失败" else if (motion != null) "动态照片已保存" else "已保存")
                     refreshUi()
                 }
@@ -641,8 +1301,10 @@ class MainActivity : AppCompatActivity() {
     private fun takeRaw(ic: ImageCapture) {
         busy = true
         b.shutter.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-        b.flashOverlay.alpha = 0.8f
-        b.flashOverlay.animate().alpha(0f).setDuration(250).start()
+        if (shutterBlink) {
+            b.flashOverlay.alpha = 0.85f
+            b.flashOverlay.animate().alpha(0f).setDuration(220).start()
+        }
         val name = "RetroCam_" + java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date())
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, "$name.dng")
@@ -686,7 +1348,7 @@ class MainActivity : AppCompatActivity() {
         val h = minOf(renderer.contentW, renderer.contentH) / 8 * 8
         val fps = cam.boundFormat?.fps ?: 30
         val file = File(cacheDir, "rec_${System.currentTimeMillis()}.mp4")
-        val timelapse = tlIdx > 0
+        val timelapse = uiMode == UiMode.TIMELAPSE
         val withAudio = !timelapse && ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         renderer.timelapseIntervalNs = if (timelapse) (tlIntervals[tlIdx] * 1e9).toLong() else 0L
         val enc = Encoders.choose(w, h, fps) ?: Encoders.Choice(MediaFormat.MIMETYPE_VIDEO_AVC, (w * h * fps * 0.2).toInt().coerceIn(16_000_000, 100_000_000))
@@ -717,7 +1379,7 @@ class MainActivity : AppCompatActivity() {
                 val uri = try { MediaSaver.saveVideo(this, f) } catch (_: Throwable) { null }
                 main.post {
                     lastUri = uri; lastIsVideo = true
-                    thumb?.let { b.thumb.setImageBitmap(it) }
+                    thumb?.let { setThumb(it) }
                     showToast(if (uri != null) "视频已保存" else "保存失败")
                 }
     }
@@ -766,72 +1428,65 @@ class MainActivity : AppCompatActivity() {
         sensorManager.registerListener(levelListener, s, SensorManager.SENSOR_DELAY_UI)
     }
 
-    private fun setupAssist() {
-        applyRatio()
-        b.btnAssist.setOnClickListener { assistOpen = !assistOpen; refreshUi() }
-        b.btnRatio.setOnClickListener {
-            if (recorder != null) return@setOnClickListener
-            if (cam.mode == Mode.PHOTO) photoRatioIdx = (photoRatioIdx + 1) % photoRatios.size
-            else videoRatioIdx = (videoRatioIdx + 1) % videoRatios.size
-            applyRatio(); refreshUi(); savePrefs()
-        }
-        b.asGrid.setOnClickListener { gridOn = !gridOn; refreshUi(); savePrefs() }
-        b.asLevel.setOnClickListener {
-            levelOn = !levelOn
-            if (levelOn) startLevel() else sensorManager.unregisterListener(levelListener)
-            refreshUi(); savePrefs()
-        }
-        b.asHist.setOnClickListener { histOn = !histOn; refreshUi(); savePrefs() }
-        b.asPeak.setOnClickListener { peakOn = !peakOn; refreshUi(); savePrefs() }
-        b.asZebra.setOnClickListener { zebraOn = !zebraOn; refreshUi(); savePrefs() }
-        b.btnFormat.setOnClickListener {
-            if (recorder != null || cam.mode != Mode.VIDEO) return@setOnClickListener
-            val list = cam.caps?.videoFormats ?: return@setOnClickListener
-            if (list.size <= 1) { showToast("这颗镜头只支持 1080p 30"); return@setOnClickListener }
-            val cur = cam.boundFormat ?: cam.videoFormat
-            val i = list.indexOfFirst { it.w == cur?.w && it.h == cur?.h && it.fps == cur?.fps }
-            val next = list[(i + 1) % list.size]
-            cam.videoFormat = next
-            val codec = Encoders.choose(next.w, next.h, next.fps)
-            showToast(next.label + (codec?.let { " · " + it.label + " " + it.bitrate / 1_000_000 + " Mbps" } ?: ""))
-            savePrefs()
-            maybeBind()
-        }
-        b.asStab.setOnClickListener {
-            if (cam.mode != Mode.VIDEO) { showToast("防抖用于录像模式"); return@setOnClickListener }
-            if (recorder != null) return@setOnClickListener
-            cam.stabRequested = !cam.stabRequested
-            savePrefs()
-            maybeBind()
-            main.postDelayed({
-                showToast(when (cam.stabActive) {
-                    Stab.PREVIEW -> "防抖 开（预览级电子防抖）"
-                    Stab.VIDEO_EIS -> "防抖 开（电子防抖）"
-                    Stab.OIS_ONLY -> "仅光学防抖，这颗镜头没有电子防抖"
-                    Stab.OFF -> if (cam.stabRequested) "这颗镜头不支持防抖" else "防抖 关"
-                })
-            }, 400)
-        }
-        b.asRaw.setOnClickListener {
-            if (cam.mode != Mode.PHOTO) { showToast("RAW 仅拍照模式可用"); return@setOnClickListener }
-            if (cam.caps?.rawSupported != true) { showToast("这颗镜头不支持 RAW"); return@setOnClickListener }
-            cam.rawRequested = !cam.rawRequested
-            showToast(if (cam.rawRequested) "RAW 开：保存 DNG 原片，不套风格" else "RAW 关")
-            maybeBind()
-        }
+    private class ProCell(val p: ProParam?, val box: FrameLayout, val icon: ImageView, val text: TextView)
+    private val proCells = ArrayList<ProCell>()
+
+    private fun isAllAuto(): Boolean {
+        val m = cam.manual
+        return m.iso == null && m.exposureNs == null && m.evIndex == 0 && m.focusDiopters == null &&
+            m.awbMode == android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_AUTO
     }
 
-    private fun setupPro() {
-        b.tabFx.setOnClickListener { tab = 0; refreshUi() }
-        b.tabPro.setOnClickListener { tab = 1; refreshPro(); refreshUi() }
-        val map = mapOf(b.proIso to ProParam.ISO, b.proShutter to ProParam.SHUTTER, b.proEv to ProParam.EV, b.proWb to ProParam.WB, b.proFocus to ProParam.FOCUS)
-        for ((v, p) in map) v.setOnClickListener {
-            if (activeParam == p) { activeParam = null } else openSlider(p)
-            refreshPro(); refreshUi()
+    private fun resetParam(p: ProParam) {
+        val m = cam.manual
+        when (p) {
+            ProParam.ISO -> m.iso = null
+            ProParam.SHUTTER -> m.exposureNs = null
+            ProParam.EV -> m.evIndex = 0
+            ProParam.WB -> m.awbMode = android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_AUTO
+            ProParam.FOCUS -> m.focusDiopters = null
         }
-        b.proReset.setOnClickListener {
-            cam.manual.reset(); cam.applyManual(); activeParam = null
-            refreshPro(); refreshUi(); showToast("已恢复全自动")
+        cam.applyManual()
+        if (activeParam == p) openSlider(p)
+        showToast(proName(p) + " 自动")
+        refreshUi()
+    }
+
+    private fun proName(p: ProParam) = when (p) { ProParam.ISO -> "ISO"; ProParam.SHUTTER -> "快门"; ProParam.EV -> "曝光补偿"; ProParam.WB -> "白平衡"; ProParam.FOCUS -> "对焦" }
+
+    private fun setupPro() {
+        val defs = listOf<Pair<ProParam?, Int>>(
+            Pair(ProParam.SHUTTER, R.drawable.ic_aperture), Pair(ProParam.ISO, 0), Pair(ProParam.EV, R.drawable.ic_ev),
+            Pair(ProParam.FOCUS, R.drawable.ic_focus), Pair(ProParam.WB, R.drawable.ic_wb), Pair(null, R.drawable.ic_drop),
+        )
+        for ((p, ic) in defs) {
+            val cell = FrameLayout(this).apply { layoutParams = LinearLayout.LayoutParams(0, dp(54f), 1f) }
+            val box = FrameLayout(this).apply {
+                setBackgroundResource(R.drawable.circ_btn)
+                layoutParams = FrameLayout.LayoutParams(dp(50f), dp(50f), Gravity.CENTER)
+            }
+            val icon = ImageView(this).apply {
+                if (ic != 0) setImageResource(ic)
+                layoutParams = FrameLayout.LayoutParams(dp(24f), dp(24f), Gravity.CENTER)
+            }
+            val text = TextView(this).apply {
+                gravity = Gravity.CENTER; setTextColor(WHITE); textSize = 12f; typeface = Typeface.DEFAULT_BOLD; maxLines = 1
+                layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+            }
+            box.addView(icon); box.addView(text); cell.addView(box); b.proRow.addView(cell)
+            proCells += ProCell(p, box, icon, text)
+            box.setOnClickListener {
+                it.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                if (p == null) { openSheet(Sheet.FILTER, LUT_CAT); return@setOnClickListener }
+                closeSheet()
+                if (activeParam == p) activeParam = null else openSlider(p)
+                refreshUi()
+            }
+            if (p != null) box.setOnLongClickListener { resetParam(p); true }
+        }
+        b.btnAuto.setOnClickListener {
+            if (isAllAuto()) showToast("点下方参数手动调节，长按单项恢复自动")
+            else { cam.manual.reset(); cam.applyManual(); activeParam = null; showToast("已恢复全自动"); refreshUi() }
         }
         b.slider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(sb: SeekBar, progress: Int, fromUser: Boolean) {
@@ -848,6 +1503,7 @@ class MainActivity : AppCompatActivity() {
             sliderBusy = true; b.slider.progress = idx; sliderBusy = false
         }
     }
+
 
     private fun optionsFor(p: ProParam): List<Opt<*>> {
         val caps = cam.caps ?: return emptyList()
@@ -902,107 +1558,46 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refreshPro() {
+        if (proCells.isEmpty()) return
         val m = cam.manual
-        val isoAuto = m.iso == null
-        val sAuto = m.exposureNs == null
-        b.proIso.text = "ISO " + (if (isoAuto) "A·" + (cam.liveIso.takeIf { it > 0 }?.toString() ?: "--") else m.iso.toString())
-        b.proShutter.text = "S " + (if (sAuto) "A·" + ManualOptions.shutterLabel(cam.liveExposureNs) else ManualOptions.shutterLabel(m.exposureNs!!))
         val step = cam.caps?.evStep ?: 0f
-        b.proEv.text = "EV " + if (m.evIndex == 0) "0" else String.format(java.util.Locale.US, "%+.1f", m.evIndex * step)
-        b.proWb.text = "WB " + (cam.caps?.let { c -> ManualOptions.wb(c).firstOrNull { it.value == m.awbMode }?.label } ?: "自动")
-        b.proFocus.text = "MF " + (m.focusDiopters?.let { ManualOptions.focusLabel(it) } ?: "A")
-        b.proIso.isSelected = activeParam == ProParam.ISO || !isoAuto
-        b.proShutter.isSelected = activeParam == ProParam.SHUTTER || !sAuto
-        b.proEv.isSelected = activeParam == ProParam.EV || m.evIndex != 0
-        b.proWb.isSelected = activeParam == ProParam.WB || m.awbMode != android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_AUTO
-        b.proFocus.isSelected = activeParam == ProParam.FOCUS || m.focusDiopters != null
+        for (c in proCells) {
+            val (txt, manual) = when (c.p) {
+                ProParam.ISO -> Pair(m.iso?.toString() ?: "ISO", m.iso != null)
+                ProParam.SHUTTER -> Pair(m.exposureNs?.let { ManualOptions.shutterLabel(it) } ?: "", m.exposureNs != null)
+                ProParam.EV -> Pair(if (m.evIndex == 0) "" else String.format(java.util.Locale.US, "%+.1f", m.evIndex * step), m.evIndex != 0)
+                ProParam.FOCUS -> Pair(m.focusDiopters?.let { ManualOptions.focusLabel(it) } ?: "", m.focusDiopters != null)
+                ProParam.WB -> {
+                    val on = m.awbMode != android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_AUTO
+                    Pair(if (!on) "" else (cam.caps?.let { cc -> ManualOptions.wb(cc).firstOrNull { it.value == m.awbMode }?.label } ?: "WB"), on)
+                }
+                null -> Pair("", lutId != null)
+            }
+            val active = c.p != null && c.p == activeParam
+            c.box.isSelected = active
+            c.text.text = txt
+            c.icon.visibility = if (txt.isEmpty()) View.VISIBLE else View.GONE
+            val col = if (active) WHITE else if (manual) ACCENT else WHITE
+            c.text.setTextColor(col)
+            c.icon.setColorFilter(col)
+        }
+        val auto = isAllAuto()
+        b.btnAuto.text = if (auto) "A" else "M"
+        b.btnAuto.isSelected = !auto
     }
 
     private val uiTicker = object : Runnable {
         override fun run() {
             b.overlay.rect = renderer.previewRect
-            if (proTab) refreshPro()
-            main.postDelayed(this, 250)
+            placeVf()
+            buildZoom()
+            refreshZoom()
+            main.postDelayed(this, 200)
         }
     }
+
 
     // ---------------- Phase 3: colour / LUT ----------------
-
-    private fun setupColor() {
-        b.tabColor.setOnClickListener { tab = 2; refreshUi() }
-        b.colLog.setOnClickListener {
-            if (recorder != null) return@setOnClickListener
-            profileLog = !profileLog
-            cam.logRequested = profileLog
-            cam.applyManual()
-            applyColor(); refreshUi(); savePrefs()
-            if (profileLog) showToast(if (cam.logHardware) "Log 开：相机输出平坦曲线，曝光自动降 1.5 档" else "Log 开：这颗镜头不能改色调曲线，用软件模拟")
-        }
-        b.colConvert.setOnClickListener {
-            convertOn = !convertOn
-            applyColor(); refreshUi(); savePrefs()
-            showToast(if (convertOn) "预览显示转换后的画面" else "显示原始 Log（选中的 LUT 直接套在 Log 上）")
-        }
-        b.colBurn.setOnClickListener {
-            if (recorder != null) return@setOnClickListener
-            burnIn = !burnIn
-            applyColor(); refreshUi(); savePrefs()
-            showToast(if (burnIn) "烧录开：视频带上 LUT 和风格" else "烧录关：视频只录原始画面（Log 不转换），预览照常")
-        }
-        b.lutSeek.progress = lutStrength
-        b.lutSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(sb: SeekBar, progress: Int, fromUser: Boolean) {
-                if (!fromUser) return
-                lutStrength = progress
-                applyColor()
-                b.lutLabel.text = "LUT ${lutStrength}%"
-            }
-            override fun onStartTrackingTouch(sb: SeekBar) {}
-            override fun onStopTrackingTouch(sb: SeekBar) { savePrefs() }
-        })
-        cam.logRequested = profileLog
-        buildLutStrip()
-        lutId?.let { id -> if (lutLib.entries().none { it.id == id }) lutId = null else loadLut(id) }
-    }
-
-    private fun lutChip(label: String, id: String?, onClick: () -> Unit): TextView = TextView(this).apply {
-        text = label
-        setTextColor(0xFFFFFFFF.toInt())
-        textSize = 13f
-        gravity = android.view.Gravity.CENTER
-        setBackgroundResource(R.drawable.chip_bg)
-        setPadding(dp(14f), 0, dp(14f), 0)
-        layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(30f)).apply { marginEnd = dp(8f) }
-        setOnClickListener { onClick() }
-        lutViews += Pair(id, this)
-    }
-
-    private fun buildLutStrip() {
-        b.lutStrip.removeAllViews()
-        lutViews.clear()
-        b.lutStrip.addView(lutChip("无 LUT", null) { selectLut(null) })
-        for (e in lutLib.entries()) {
-            val v = lutChip(e.name, e.id) { selectLut(e.id) }
-            if (!e.builtin) v.setOnLongClickListener {
-                androidx.appcompat.app.AlertDialog.Builder(this)
-                    .setTitle("删除 LUT")
-                    .setMessage("删除「${e.name}」？")
-                    .setPositiveButton("删除") { _, _ ->
-                        lutLib.delete(e.id)
-                        if (lutId == e.id) selectLut(null)
-                        buildLutStrip(); refreshUi()
-                    }
-                    .setNegativeButton("取消", null)
-                    .show()
-                true
-            }
-            b.lutStrip.addView(v)
-        }
-        val add = lutChip("＋ 导入 .cube", "__import__") { importLut.launch(arrayOf("*/*")) }
-        add.setTextColor(0xFFFFB547.toInt())
-        b.lutStrip.addView(add)
-        refreshUi()
-    }
 
     private fun selectLut(id: String?) {
         lutId = id
@@ -1043,7 +1638,7 @@ class MainActivity : AppCompatActivity() {
     private fun chip(parent: LinearLayout, label: String, selected: Boolean, accent: Boolean = false, onClick: () -> Unit): TextView {
         val tv = TextView(this).apply {
             text = label
-            setTextColor(if (accent) 0xFFFFB547.toInt() else 0xFFFFFFFF.toInt())
+            setTextColor(if (accent) 0xFFF04A2C.toInt() else 0xFFFFFFFF.toInt())
             textSize = 13f
             gravity = android.view.Gravity.CENTER
             setBackgroundResource(R.drawable.chip_bg)
@@ -1056,60 +1651,6 @@ class MainActivity : AppCompatActivity() {
         return tv
     }
 
-    private fun setupCreative() {
-        b.tabCreative.setOnClickListener { tab = 3; buildCreative(); refreshUi() }
-        cam.hiResPreview = cam.mode == Mode.PHOTO && creative in ACCUM_MODES
-        buildCreative()
-    }
-
-    private fun setCreative(c: Creative) {
-        if (busy || renderer.accumulating) return
-        if (c != Creative.MULTI) clearMulti()
-        creative = c
-        val hi = c in ACCUM_MODES
-        if (cam.hiResPreview != hi) { cam.hiResPreview = hi; maybeBind() }
-        buildCreative(); refreshUi()
-        showToast(when (c) {
-            Creative.NORMAL -> "普通拍照"
-            Creative.SLOW -> "慢快门：按下后保持手机稳定，画面里移动的东西会拖出轨迹"
-            Creative.BLUR -> "运动模糊：短时间叠加，适合追拍和车流"
-            Creative.LIGHT -> "光绘：只留下最亮的光迹，暗环境效果最好"
-            Creative.MULTI -> "多重曝光：拍两张，自动叠在一起"
-            Creative.LIVE -> "动态照片：记录按快门前后约 1 秒"
-        })
-    }
-
-    private fun buildCreative() {
-        b.creativeStrip.removeAllViews(); b.optStrip.removeAllViews(); b.borderStrip.removeAllViews()
-        val photo = cam.mode == Mode.PHOTO
-        if (photo) {
-            for (c in Creative.values()) chip(b.creativeStrip, c.label, creative == c) { setCreative(c) }
-        } else {
-            chip(b.creativeStrip, "普通录像", tlIdx == 0) { if (recorder == null) { tlIdx = 0; savePrefs(); buildCreative(); refreshUi() } }
-            chip(b.creativeStrip, "延时摄影", tlIdx > 0) { if (recorder == null) { if (tlIdx == 0) tlIdx = 2; savePrefs(); buildCreative(); refreshUi(); showToast("延时摄影：按设定间隔拍一帧，不录声音") } }
-        }
-        chip(b.creativeStrip, "＋ 编辑照片", false, accent = true) { pickPhoto.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
-
-        if (photo) { when (creative) {
-            Creative.SLOW -> slowSecs.forEachIndexed { i, v -> chip(b.optStrip, secsLabel(v), i == slowIdx) { slowIdx = i; savePrefs(); buildCreative(); updateHud() } }
-            Creative.BLUR -> blurSecs.forEachIndexed { i, v -> chip(b.optStrip, secsLabel(v), i == blurIdx) { blurIdx = i; savePrefs(); buildCreative(); updateHud() } }
-            Creative.LIGHT -> lightSecs.forEachIndexed { i, v -> chip(b.optStrip, secsLabel(v), i == lightIdx) { lightIdx = i; savePrefs(); buildCreative(); updateHud() } }
-            Creative.MULTI -> {
-                chip(b.optStrip, "叠加（变亮）", multiScreen) { multiScreen = true; buildCreative() }
-                chip(b.optStrip, "平均", !multiScreen) { multiScreen = false; buildCreative() }
-                if (multiFirst != null) chip(b.optStrip, "重拍第一张", false, accent = true) { clearMulti(); buildCreative(); updateHud() }
-            }
-            Creative.LIVE -> chip(b.optStrip, "保存为动态照片（MVIMG）", true) {}
-            Creative.NORMAL -> chip(b.optStrip, "选一个创意模式", false) {}
-        } } else {
-            if (tlIdx > 0) tlIntervals.forEachIndexed { i, v ->
-                if (i > 0) chip(b.optStrip, "每 " + (if (v < 1f) "0.5" else v.toInt().toString()) + " 秒一帧", i == tlIdx) { if (recorder == null) { tlIdx = i; savePrefs(); buildCreative(); updateHud() } }
-            } else chip(b.optStrip, "防抖、格式在辅助和顶栏里", false) {}
-        }
-
-        for (bd in Border.values()) chip(b.borderStrip, bd.label, border == bd) { border = bd; savePrefs(); buildCreative() }
-    }
-
     private fun updateHud() {
         val photo = cam.mode == Mode.PHOTO
         val text = when {
@@ -1119,7 +1660,7 @@ class MainActivity : AppCompatActivity() {
             photo && creative == Creative.LIGHT -> "光绘 " + secsLabel(lightSecs[lightIdx])
             photo && creative == Creative.MULTI -> if (multiFirst != null) "多重曝光 · 拍第二张" else "多重曝光 · 拍第一张"
             photo && creative == Creative.LIVE -> "动态照片"
-            !photo && tlIdx > 0 && recorder == null -> "延时 每 " + (if (tlIntervals[tlIdx] < 1f) "0.5" else tlIntervals[tlIdx].toInt().toString()) + " 秒一帧"
+            uiMode == UiMode.TIMELAPSE && recorder == null -> "延时 每 " + (if (tlIntervals[tlIdx] < 1f) "0.5" else tlIntervals[tlIdx].toInt().toString()) + " 秒一帧"
             else -> ""
         }
         if (text == null) return
@@ -1185,7 +1726,7 @@ class MainActivity : AppCompatActivity() {
                     multiFirst = bmp
                     showGhost(bmp, o)
                     busy = false
-                    buildCreative(); updateHud()
+                    buildOptions(); updateHud()
                     showToast("第一张已拍，对准第二个画面再按快门")
                 } else {
                     multiFirst = null
@@ -1196,7 +1737,7 @@ class MainActivity : AppCompatActivity() {
                         val blended = try { blend(first, bmp, screen) } catch (t: Throwable) { null }
                         first.recycle(); bmp.recycle()
                         main.post {
-                            buildCreative(); updateHud()
+                            buildOptions(); updateHud()
                             if (blended == null) { busy = false; showToast("合成失败") } else finishStill(blended, info)
                         }
                     }
@@ -1282,33 +1823,35 @@ class MainActivity : AppCompatActivity() {
     // ---------------- Phase 4: editor ----------------
 
     private fun setupEditor() {
-        for (st in Styles.all) {
-            editStyleViews += chip(b.editStyleStrip, st.name, false) {
-                editParams.style = st.id; editParams.stampKind = st.stamp; applyEditFx(); refreshEditor(); renderEdit()
-            }
-        }
-        for (bd in Border.values()) editBorderViews += Pair(bd, chip(b.editBorderStrip, bd.label, false) { editBorder = bd; refreshEditor(); renderEdit() })
         b.editIntensity.setOnClickListener { editIntensityIdx = (editIntensityIdx + 1) % intensities.size; applyEditFx(); refreshEditor(); renderEdit() }
         b.editGrain.setOnClickListener { editGrain = !editGrain; applyEditFx(); refreshEditor(); renderEdit() }
         b.editVignette.setOnClickListener { editVignette = !editVignette; applyEditFx(); refreshEditor(); renderEdit() }
         b.editLeak.setOnClickListener { editLeak = !editLeak; applyEditFx(); refreshEditor(); renderEdit() }
         b.editDate.setOnClickListener { editParams.dateStamp = !editParams.dateStamp; refreshEditor(); renderEdit() }
+        listOf(b.editTabStyle, b.editTabLut, b.editTabFx, b.editTabBorder).forEachIndexed { i, v -> v.setOnClickListener { editTab = i; refreshEditor() } }
         b.editCancel.setOnClickListener { closeEditor() }
         b.editSave.setOnClickListener { saveEdit() }
     }
 
     private fun applyEditFx() = fxInto(editParams, editGrain, editVignette, editLeak, intensities[editIntensityIdx])
 
-    private fun buildEditLuts() {
-        b.editLutStrip.removeAllViews(); editLutViews.clear()
-        editLutViews += Pair(null, chip(b.editLutStrip, "无 LUT", false) { selectLut(null); refreshEditor(); renderEdit() })
-        for (e in lutLib.entries()) editLutViews += Pair(e.id, chip(b.editLutStrip, e.name, false) { selectLut(e.id); refreshEditor() })
+    private fun buildEditStrips() {
+        b.editStyleStrip.removeAllViews()
+        for (st in Styles.all) tile(b.editStyleStrip, if (st.id == 0) "原图" else st.name, styleTiles[st.id]!!, editParams.style == st.id) {
+            editParams.style = st.id; editParams.stampKind = st.stamp; applyEditFx(); buildEditStrips(); renderEdit()
+        }
+        b.editLutStrip.removeAllViews()
+        tile(b.editLutStrip, "无 LUT", Tile(0xFF4A4A4A.toInt(), 0xFF262626.toInt(), "⊘"), lutId == null) { selectLut(null); buildEditStrips(); renderEdit() }
+        for (e in lutLib.entries()) tile(b.editLutStrip, e.name, lutTile(e.name), lutId == e.id) { selectLut(e.id); buildEditStrips() }
+        b.editBorderStrip.removeAllViews()
+        for (bd in Border.values()) chip(b.editBorderStrip, bd.label, editBorder == bd) { editBorder = bd; buildEditStrips(); renderEdit() }
     }
 
     private fun refreshEditor() {
-        for ((i, v) in editStyleViews.withIndex()) v.isSelected = Styles.all[i].id == editParams.style
-        for ((bd, v) in editBorderViews) v.isSelected = bd == editBorder
-        for ((id, v) in editLutViews) v.isSelected = id == lutId
+        val tabs = listOf(b.editTabStyle, b.editTabLut, b.editTabFx, b.editTabBorder)
+        val panes = listOf<View>(b.editPaneStyle, b.editPaneLut, b.editPaneFx, b.editPaneBorder)
+        tabs.forEachIndexed { i, v -> v.isSelected = i == editTab }
+        panes.forEachIndexed { i, v -> v.visibility = if (i == editTab) View.VISIBLE else View.GONE }
         b.editIntensity.text = "强度 ${(intensities[editIntensityIdx] * 100).toInt()}%"
         b.editGrain.isSelected = editGrain
         b.editVignette.isSelected = editVignette
@@ -1316,6 +1859,7 @@ class MainActivity : AppCompatActivity() {
         b.editDate.isSelected = editParams.dateStamp
         b.editDate.text = if (editParams.dateStamp) "日期 开" else "日期 关"
     }
+
 
     private fun decodeForEdit(uri: Uri, maxSide: Int): Bitmap =
         ImageDecoder.decodeBitmap(ImageDecoder.createSource(contentResolver, uri)) { d, info, _ ->
@@ -1356,7 +1900,7 @@ class MainActivity : AppCompatActivity() {
         editParams.dateStamp = false
         editBorder = border
         applyEditFx()
-        buildEditLuts()
+        buildEditStrips()
         refreshEditor()
         b.editor.visibility = View.VISIBLE
         b.editTitle.text = "编辑"
@@ -1429,7 +1973,7 @@ class MainActivity : AppCompatActivity() {
                         editSaving = false
                         if (saved == null) { b.editTitle.text = "保存失败"; b.editBusy.visibility = View.GONE; return@post }
                         lastUri = saved; lastIsVideo = false
-                        thumb?.let { b.thumb.setImageBitmap(it) }
+                        thumb?.let { setThumb(it) }
                         closeEditor()
                         showToast("已另存一张新照片")
                     }
@@ -1441,7 +1985,7 @@ class MainActivity : AppCompatActivity() {
     private fun closeEditor() {
         if (editSaving) return
         b.editor.visibility = View.GONE
-        backCb.isEnabled = false
+        syncBack()
         editUri = null
         b.editImage.setImageBitmap(null)
         editShown?.recycle(); editShown = null
@@ -1474,7 +2018,10 @@ class MainActivity : AppCompatActivity() {
         burnIn = prefs.getBoolean("burn", true)
         stabPref = prefs.getBoolean("stab", true)
         border = Border.values().getOrElse(prefs.getInt("border", 0)) { Border.NONE }
-        tlIdx = prefs.getInt("tl", 0).coerceIn(0, tlIntervals.size - 1)
+        tlIdx = prefs.getInt("tl2", 2).coerceIn(1, tlIntervals.size - 1)
+        mirrorFront = prefs.getBoolean("mirror", true)
+        volShutter = prefs.getBoolean("volShutter", true)
+        shutterBlink = prefs.getBoolean("blink", true)
         slowIdx = prefs.getInt("slow", 1).coerceIn(0, slowSecs.size - 1)
         blurIdx = prefs.getInt("blur", 1).coerceIn(0, blurSecs.size - 1)
         lightIdx = prefs.getInt("light", 0).coerceIn(0, lightSecs.size - 1)
@@ -1505,7 +2052,11 @@ class MainActivity : AppCompatActivity() {
             .putBoolean("burn", burnIn)
             .putBoolean("stab", cam.stabRequested)
             .putInt("border", border.ordinal)
-            .putInt("tl", tlIdx)
+            .putInt("tl2", tlIdx)
+            .putInt("uimode", uiMode.ordinal)
+            .putBoolean("mirror", mirrorFront)
+            .putBoolean("volShutter", volShutter)
+            .putBoolean("blink", shutterBlink)
             .putInt("slow", slowIdx)
             .putInt("blur", blurIdx)
             .putInt("light", lightIdx)

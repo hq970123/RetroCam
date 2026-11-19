@@ -313,6 +313,10 @@ class CameraRenderer(private val params: LookParams) {
 
     /** Content rect of the preview inside the view, in view pixels (for tap mapping). */
     @Volatile var previewRect = android.graphics.RectF()
+    /** Pixels reserved above the viewfinder (top bar); -1 = default. */
+    @Volatile var topInset = -1
+    /** Horizontal margin on each side of the viewfinder, in pixels. */
+    @Volatile var sideInset = 0
 
     fun start(onReady: (SurfaceTexture) -> Unit) {
         handler.post {
@@ -407,11 +411,12 @@ class CameraRenderer(private val params: LookParams) {
                 GLES30.glClearColor(0f, 0f, 0f, 1f)
                 GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
                 // full-frame placement is fixed by the uncropped frame so switching ratio doesn't jump
-                val viewAspect = displayW.toFloat() / displayH
                 val full = contentW.toFloat() / contentH
                 val fw: Int; val fh: Int
-                if (viewAspect > full) { fh = displayH; fw = (displayH * full).toInt() } else { fw = displayW; fh = (displayW / full).toInt() }
-                val topOffset = (displayH * 0.11f).toInt()
+                val side = sideInset.coerceIn(0, displayW / 4)
+                val availW = displayW - 2 * side
+                if (availW.toFloat() / displayH > full) { fh = displayH; fw = (displayH * full).toInt() } else { fw = availW; fh = (availW / full).toInt() }
+                val topOffset = if (topInset >= 0) topInset else (displayH * 0.11f).toInt()
                 var fTop = if (displayH - fh >= topOffset * 2) topOffset else (displayH - fh) / 2
                 if (fTop + fh > displayH) fTop = (displayH - fh) / 2
                 val fLeft = (displayW - fw) / 2

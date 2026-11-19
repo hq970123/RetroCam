@@ -381,6 +381,8 @@ class CameraController(private val context: Context, private val renderer: Camer
         cam.cameraControl.setZoomRatio(ratio.coerceIn(z.minZoomRatio, z.maxZoomRatio))
     }
 
+    fun zoomRange(): Pair<Float, Float>? = camera?.cameraInfo?.zoomState?.value?.let { Pair(it.minZoomRatio, it.maxZoomRatio) }
+
     fun zoomRatio(): Float = camera?.cameraInfo?.zoomState?.value?.zoomRatio ?: 1f
 
     fun setTorch(on: Boolean) { camera?.cameraControl?.enableTorch(on) }

@@ -41,6 +41,10 @@ class OverlayView @JvmOverloads constructor(ctx: Context, attrs: AttributeSet? =
         Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(110, 80, 120, 255) },
     )
     private val path = Path()
+    private val maskPath = Path()
+    private val maskPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.BLACK }
+    /** Rounds the viewfinder corners by painting black outside a rounded rect. */
+    var corner = 0f
 
     override fun onDraw(c: Canvas) {
         val r = rect
@@ -55,6 +59,13 @@ class OverlayView @JvmOverloads constructor(ctx: Context, attrs: AttributeSet? =
         }
         if (level) drawLevel(c, r)
         if (showHistogram) drawHistogram(c, r)
+        if (corner > 0f) {
+            maskPath.reset()
+            maskPath.fillType = Path.FillType.EVEN_ODD
+            maskPath.addRect(r, Path.Direction.CW)
+            maskPath.addRoundRect(r, corner, corner, Path.Direction.CW)
+            c.drawPath(maskPath, maskPaint)
+        }
     }
 
     private fun drawLevel(c: Canvas, r: RectF) {
@@ -72,7 +83,7 @@ class OverlayView @JvmOverloads constructor(ctx: Context, attrs: AttributeSet? =
         c.drawLine(cx + half, cy, cx + half + 18 * dp, cy, levelPaint)
         c.restore()
         // live horizon
-        levelPaint.color = if (ok) Color.rgb(80, 230, 120) else Color.rgb(255, 181, 71)
+        levelPaint.color = if (ok) Color.rgb(80, 230, 120) else Color.rgb(240, 74, 44)
         c.save()
         c.rotate(roll, cx, cy)
         c.drawLine(cx - half, cy, cx + half, cy, levelPaint)
