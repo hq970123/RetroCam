@@ -109,25 +109,21 @@
             <LinearLayout android:id="@+id/optStrip" android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal" />
         </HorizontalScrollView>
 
-        <FrameLayout android:layout_width="match_parent" android:layout_height="wrap_content">
+        <FrameLayout android:layout_width="match_parent" android:layout_height="44dp">
+            <TextView android:id="@+id/btnAuto" android:layout_width="44dp" android:layout_height="44dp"
+                android:layout_gravity="center_vertical|start"
+                android:background="@drawable/vf_circ" android:gravity="center" android:text="A"
+                android:textColor="#FFFFFF" android:textSize="18sp" />
             <LinearLayout
                 android:id="@+id/zoomStrip"
                 android:layout_width="wrap_content"
                 android:layout_height="44dp"
-                android:layout_gravity="bottom|center_horizontal"
+                android:layout_gravity="center"
                 android:gravity="center_vertical"
                 android:orientation="horizontal" />
-            <LinearLayout
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_gravity="bottom|end"
-                android:orientation="vertical">
-                <TextView android:id="@+id/btnAuto" android:layout_width="44dp" android:layout_height="44dp"
-                    android:background="@drawable/vf_circ" android:gravity="center" android:text="A"
-                    android:textColor="#FFFFFF" android:textSize="18sp" />
-                <ImageView android:id="@+id/btnQuick" android:layout_width="44dp" android:layout_height="44dp"
-                    android:layout_marginTop="10dp" android:background="@drawable/vf_circ" android:padding="11dp" android:src="@drawable/ic_dots" />
-            </LinearLayout>
+            <ImageView android:id="@+id/btnQuick" android:layout_width="44dp" android:layout_height="44dp"
+                android:layout_gravity="center_vertical|end"
+                android:background="@drawable/vf_circ" android:padding="11dp" android:src="@drawable/ic_dots" />
         </FrameLayout>
     </LinearLayout>
 
