@@ -13,6 +13,10 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.Executor
 
+/** PiP window width and margin, as fractions of the content width. */
+const val PIP_W = 0.3f
+const val PIP_M = 0.045f
+
 /**
  * Owns the GL thread: camera SurfaceTexture -> look shader -> screen (+ encoder).
  * Content coordinates are upright portrait (the SurfaceTexture matrix carries the
@@ -317,6 +321,92 @@ class CameraRenderer(private val params: LookParams) {
     @Volatile var topInset = -1
     /** Horizontal margin on each side of the viewfinder, in pixels. */
     @Volatile var sideInset = 0
+    // ---------------- dual camera (picture in picture) ----------------
+    private var pipTex = 0
+    lateinit var pipSurfaceTexture: SurfaceTexture
+        private set
+    private val pipMatrix = FloatArray(16)
+    @Volatile private var pipReady = false
+    /** Second camera drawn as a small window in the top-left corner. */
+    @Volatile var pipEnabled = false
+        set(v) { field = v; if (!v) pipReady = false }
+    @Volatile var pipContentW = 480
+    @Volatile var pipContentH = 640
+
+    /** PiP rect inside the (cropped) content, as fractions of the content width/height: left, top, width, height. */
+    fun pipFrac(contentWpx: Float, contentHpx: Float): FloatArray {
+        val pw = PIP_W * contentWpx
+        val ph = pw * 4f / 3f
+        val m = PIP_M * contentWpx
+        return floatArrayOf(m / contentWpx, m / contentHpx, pw / contentWpx, ph / contentHpx)
+    }
+
+    private fun pipCrop(): FloatArray {
+        val a = 3f / 4f
+        val ca = pipContentW.toFloat() / pipContentH
+        if (kotlin.math.abs(a - ca) < 0.01f) return NO_CROP
+        return if (a < ca) { val sx = a / ca; floatArrayOf((1f - sx) / 2f, 0f, sx, 1f) }
+        else { val sy = ca / a; floatArrayOf(0f, (1f - sy) / 2f, 1f, sy) }
+    }
+
+    /**
+     * Draws the PiP over content occupying (x0, y0) with portrait size w x h (pixels). When [rotated] the content is
+     * drawn rotated clockwise into a landscape viewport of size h x w (encoder path, Gl.posRot = ROT_CW).
+     */
+    private fun drawPip(x0: Int, y0: Int, w: Int, h: Int, rotated: Boolean, p: LookParams, time: Float) {
+        if (!pipEnabled || !pipReady) return
+        val pw = (PIP_W * w).toInt(); val ph = pw * 4 / 3; val m = (PIP_M * w).toInt()
+        val bd = maxOf(2, w / 220)
+        val vx: Int; val vy: Int; val vw: Int; val vh: Int
+        if (!rotated) { vx = x0 + m; vy = y0 + h - m - ph; vw = pw; vh = ph }
+        else { vx = x0 + h - m - ph; vy = y0 + w - m - pw; vw = ph; vh = pw }
+        GLES30.glEnable(GLES30.GL_SCISSOR_TEST)
+        GLES30.glScissor(vx - bd, vy - bd, vw + 2 * bd, vh + 2 * bd)
+        GLES30.glClearColor(1f, 1f, 1f, 1f)
+        GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
+        GLES30.glDisable(GLES30.GL_SCISSOR_TEST)
+        GLES30.glClearColor(0f, 0f, 0f, 1f)
+        GLES30.glViewport(vx, vy, vw, vh)
+        oesProgram.draw(pipTex, pipMatrix, p, time, 0.75f, crop = pipCrop())
+    }
+
+    /** Renders the current composite (main + PiP, no look) at content resolution and returns it upright. GL thread callback. */
+    fun grabComposite(onDone: (Bitmap?) -> Unit) = handler.post {
+        var fbo = 0; var tex = 0
+        try {
+            egl.makeCurrent(displaySurface ?: pbuffer)
+            val crop = crop()
+            var w = (contentW * crop[2]).toInt(); var h = (contentH * crop[3]).toInt()
+            val maxSide = 2400
+            if (maxOf(w, h) > maxSide) { val sc = maxSide.toFloat() / maxOf(w, h); w = (w * sc).toInt(); h = (h * sc).toInt() }
+            tex = Gl.createTexture2D(null)
+            GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA, w, h, 0, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, null)
+            val f = IntArray(1); GLES30.glGenFramebuffers(1, f, 0); fbo = f[0]
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, fbo)
+            GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0, GLES30.GL_TEXTURE_2D, tex, 0)
+            GLES30.glViewport(0, 0, w, h)
+            Gl.posRot = Gl.IDENTITY_ROT
+            oesProgram.draw(oesTex, texMatrix, cleanParams, 0f, w.toFloat() / h, crop = crop)
+            drawPip(0, 0, w, h, false, cleanParams, 0f)
+            val buf = ByteBuffer.allocateDirect(w * h * 4).order(ByteOrder.nativeOrder())
+            GLES30.glReadPixels(0, 0, w, h, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, buf)
+            buf.rewind()
+            val raw = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            raw.copyPixelsFromBuffer(buf)
+            val flip = android.graphics.Matrix().apply { postScale(1f, -1f) }
+            val out = Bitmap.createBitmap(raw, 0, 0, w, h, flip, false)
+            if (out !== raw) raw.recycle()
+            onDone(out)
+        } catch (t: Throwable) {
+            Log.e(tag, "grabComposite", t)
+            onDone(null)
+        } finally {
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+            if (fbo != 0) GLES30.glDeleteFramebuffers(1, intArrayOf(fbo), 0)
+            Gl.deleteTexture(tex)
+        }
+    }
+
     /** Pixels reserved below the viewfinder (zoom row + controls); 0 = none. */
     @Volatile var bottomInset = 0
 
@@ -332,6 +422,17 @@ class CameraRenderer(private val params: LookParams) {
             oesTex = Gl.createOesTexture()
             surfaceTexture = SurfaceTexture(oesTex)
             surfaceTexture.setOnFrameAvailableListener({ drawFrame() }, handler)
+            pipTex = Gl.createOesTexture()
+            pipSurfaceTexture = SurfaceTexture(pipTex)
+            pipSurfaceTexture.setOnFrameAvailableListener({
+                try {
+                    val cur = displaySurface ?: encSurface ?: pbuffer
+                    egl.makeCurrent(cur)
+                    pipSurfaceTexture.updateTexImage()
+                    pipSurfaceTexture.getTransformMatrix(pipMatrix)
+                    pipReady = true
+                } catch (t: Throwable) { Log.w(tag, "pip frame", t) }
+            }, handler)
             onReady(surfaceTexture)
         }
     }
@@ -432,7 +533,9 @@ class CameraRenderer(private val params: LookParams) {
                 if (showAcc) look2d.draw(accTex, identity, params, time, aspect, crop = crop)
                 else drawLook(time, aspect, crop, peaking = peaking, zebra = zebra,
                     texelX = 1f / maxOf(1f, cw), texelY = 1f / maxOf(1f, ch))
+                if (!showAcc) drawPip(vx, vy, vw, vh, false, params, time)
                 if (params.dateStamp && stampTex != 0 && !showAcc) {
+                    GLES30.glViewport(vx, vy, vw, vh)
                     overlay.drawStamp(stampTex, stampBw, stampBh, cw.toInt(), ch.toInt(), orientation, Stamp.widthFrac(params.stampKind))
                 }
                 egl.swap(ds)
@@ -464,10 +567,14 @@ class CameraRenderer(private val params: LookParams) {
                 if (aspect < ea) { sh = ph; sw = (ph * aspect).toInt() } else { sw = pw; sh = (pw / aspect).toInt() }
                 GLES30.glViewport((encW - sh) / 2, (encH - sw) / 2, sh, sw)
                 Gl.posRot = Gl.ROT_CW
+                val ex0 = (encW - sh) / 2; val ey0 = (encH - sw) / 2
                 if (cleanRecord) {
                     oesProgram.draw(oesTex, texMatrix, cleanParams, time, aspect, crop = crop, colorState = cleanColor, lut = null)
+                    drawPip(ex0, ey0, sw, sh, true, cleanParams, time)
                 } else {
                     drawLook(time, aspect, crop)
+                    drawPip(ex0, ey0, sw, sh, true, params, time)
+                    GLES30.glViewport(ex0, ey0, sh, sw)
                     if (params.dateStamp && stampTex != 0) {
                         overlay.drawStamp(stampTex, stampBw, stampBh, sw, sh, recRotation, Stamp.widthFrac(params.stampKind))
                     }
@@ -555,6 +662,7 @@ class CameraRenderer(private val params: LookParams) {
             encSurface?.let { egl.releaseSurface(it) }
             displaySurface?.let { egl.releaseSurface(it) }
             surfaceTexture.release()
+            pipSurfaceTexture.release()
             egl.releaseSurface(pbuffer)
             egl.release()
         } catch (_: Throwable) {}

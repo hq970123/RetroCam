@@ -119,6 +119,82 @@ class CameraController(private val context: Context, private val renderer: Camer
         }, ContextCompat.getMainExecutor(context))
     }
 
+    /** Front + back at once (picture in picture). */
+    var dual = false
+    /** Called when dual was requested but the phone can't run two cameras together. */
+    var onDualUnsupported: (() -> Unit)? = null
+
+    fun dualSupported(): Boolean = try {
+        provider?.availableConcurrentCameraInfos?.any { l ->
+            l.any { it.lensFacing == CameraSelector.LENS_FACING_BACK } && l.any { it.lensFacing == CameraSelector.LENS_FACING_FRONT }
+        } == true
+    } catch (_: Throwable) { false }
+
+    private fun bindDual(owner: LifecycleOwner, onBound: () -> Unit): Boolean {
+        val p = provider ?: return false
+        val pair = try {
+            p.availableConcurrentCameraInfos.firstOrNull { l ->
+                l.any { it.lensFacing == CameraSelector.LENS_FACING_BACK } && l.any { it.lensFacing == CameraSelector.LENS_FACING_FRONT }
+            }
+        } catch (t: Throwable) { Log.w(tag, "concurrent infos", t); null } ?: return false
+        val mainInfo = pair.firstOrNull { it.lensFacing == lensFacing } ?: return false
+        val pipInfo = pair.firstOrNull { it.lensFacing != lensFacing } ?: return false
+        caps = readCaps(mainInfo)
+        val photo = mode == Mode.PHOTO
+        val ratio = if (photo) AspectRatio.RATIO_4_3 else AspectRatio.RATIO_16_9
+        val mainSel = ResolutionSelector.Builder()
+            .setAspectRatioStrategy(AspectRatioStrategy(ratio, AspectRatioStrategy.FALLBACK_RULE_AUTO))
+            .setResolutionStrategy(ResolutionStrategy(if (photo) Size(1440, 1080) else Size(1920, 1080), ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER))
+            .build()
+        val mainBuilder = Preview.Builder().setResolutionSelector(mainSel).setTargetRotation(Surface.ROTATION_0)
+        Camera2Interop.Extender(mainBuilder).setSessionCaptureCallback(captureCallback)
+        val main = mainBuilder.build()
+        main.setSurfaceProvider(renderer.executor) { request ->
+            val res = request.resolution
+            streamSize = res
+            val st = renderer.surfaceTexture
+            st.setDefaultBufferSize(res.width, res.height)
+            if (res.width >= res.height) renderer.setContentSize(res.height, res.width) else renderer.setContentSize(res.width, res.height)
+            val surface = Surface(st)
+            request.provideSurface(surface, renderer.executor) { surface.release() }
+        }
+        val pipSel = ResolutionSelector.Builder()
+            .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
+            .setResolutionStrategy(ResolutionStrategy(Size(640, 480), ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER))
+            .build()
+        val pip = Preview.Builder().setResolutionSelector(pipSel).setTargetRotation(Surface.ROTATION_0).build()
+        pip.setSurfaceProvider(renderer.executor) { request ->
+            val res = request.resolution
+            val st = renderer.pipSurfaceTexture
+            st.setDefaultBufferSize(res.width, res.height)
+            if (res.width >= res.height) { renderer.pipContentW = res.height; renderer.pipContentH = res.width }
+            else { renderer.pipContentW = res.width; renderer.pipContentH = res.height }
+            val surface = Surface(st)
+            request.provideSurface(surface, renderer.executor) { surface.release() }
+        }
+        return try {
+            p.unbindAll()
+            val c1 = androidx.camera.core.ConcurrentCamera.SingleCameraConfig(mainInfo.cameraSelector,
+                androidx.camera.core.UseCaseGroup.Builder().addUseCase(main).build(), owner)
+            val c2 = androidx.camera.core.ConcurrentCamera.SingleCameraConfig(pipInfo.cameraSelector,
+                androidx.camera.core.UseCaseGroup.Builder().addUseCase(pip).build(), owner)
+            val cc = p.bindToLifecycle(listOf(c1, c2))
+            camera = cc.cameras.firstOrNull()
+            imageCapture = null
+            rawActive = false
+            boundFormat = if (photo) null else VideoFormat(1920, 1080, 30, Range(30, 30))
+            stabActive = Stab.OFF
+            renderer.pipEnabled = true
+            applyManual()
+            onBound()
+            true
+        } catch (t: Throwable) {
+            Log.e(tag, "dual bind failed", t)
+            renderer.pipEnabled = false
+            false
+        }
+    }
+
     fun hasFront(): Boolean = provider?.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA) == true
 
     private val captureCallback = object : CameraCaptureSession.CaptureCallback() {
@@ -131,6 +207,12 @@ class CameraController(private val context: Context, private val renderer: Camer
 
     fun bind(owner: LifecycleOwner, flashMode: Int, onBound: () -> Unit = {}) {
         val p = provider ?: return
+        if (dual) {
+            if (bindDual(owner, onBound)) return
+            dual = false
+            onDualUnsupported?.invoke()
+        }
+        renderer.pipEnabled = false
         val photo = mode == Mode.PHOTO
         val selector = CameraSelector.Builder().requireLensFacing(lensFacing).build()
         val info = try { p.getCameraInfo(selector) } catch (t: Throwable) { null }

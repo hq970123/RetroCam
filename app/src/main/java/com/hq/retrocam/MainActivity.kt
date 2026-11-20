@@ -159,6 +159,14 @@ class MainActivity : AppCompatActivity() {
     private val tlIntervals = floatArrayOf(0f, 0.5f, 1f, 2f, 5f)
     private var tlIdx = 2
     private var border = Border.NONE
+    private var lastBorder = Border.WHITE
+    private var wmSample: Bitmap? = null
+    private val wmCache = HashMap<Border, Bitmap>()
+    private var hudHidden = false
+    private lateinit var vidBar: LinearLayout
+    private val vidCells = HashMap<String, TextView>()
+    private lateinit var vidTc: TextView
+    private lateinit var vidSub: TextView
     private var liveRec: VideoRecorder? = null
     private var accumSecs = 0f
     private val pickPhoto = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri -> if (uri != null) openEditor(uri) }
@@ -170,7 +178,7 @@ class MainActivity : AppCompatActivity() {
         MULTI("多重曝光", R.drawable.ic_multi), LIVE("动态照片", R.drawable.ic_live),
     }
     private var uiMode = UiMode.PHOTO
-    private enum class Sheet { NONE, QUICK, MODE, FILTER }
+    private enum class Sheet { NONE, QUICK, MODE, FILTER, WATERMARK }
     private var sheet = Sheet.NONE
     private var filterCat = 0
     private var settingsTab = 0
@@ -266,12 +274,15 @@ class MainActivity : AppCompatActivity() {
         b.thumb.clipToOutline = true
         setupInsets()
         renderer.onHistogram = { bins -> main.post { b.overlay.setHistogram(bins) } }
+        setupVidBar()
         setupControls()
         setupPro()
         setupFilter()
         setupSettings()
         setupEditor()
         onBackPressedDispatcher.addCallback(this, backCb)
+        cam.dual = prefs.getBoolean("dual", false)
+        cam.onDualUnsupported = { main.post { prefs.edit().putBoolean("dual", false).apply(); showToast("这台手机不支持前后摄同时开启，已关闭双景"); if (sheet == Sheet.QUICK) buildQuick() } }
         cam.onBindFallback = { main.post { showToast("这个格式/防抖组合不支持，已回退 1080p 30") } }
         lutId?.let { id -> if (lutLib.entries().none { it.id == id }) lutId = null else loadLut(id) }
         applyRatio()
@@ -287,7 +298,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupInsets() {
-        b.topBar.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ -> renderer.topInset = v.bottom + dp(6f) }
+        b.topBar.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateTopInset() }
         // reserve the zoom row (44dp) plus gaps above the pro row so the viewfinder never sits under controls
         b.bottomPanel.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
             val h = (v.parent as View).height
@@ -380,6 +391,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setThumb(bmp: Bitmap) {
+        try {
+            val sc = 420f / maxOf(bmp.width, bmp.height)
+            wmSample = if (sc < 1f) Bitmap.createScaledBitmap(bmp, (bmp.width * sc).toInt(), (bmp.height * sc).toInt(), true) else bmp.copy(Bitmap.Config.ARGB_8888, false)
+            wmCache.clear()
+        } catch (_: Throwable) {}
         b.thumb.setPadding(0, 0, 0, 0)
         b.thumb.setImageBitmap(bmp)
     }
@@ -414,6 +430,7 @@ class MainActivity : AppCompatActivity() {
         b.btnFormat.setOnClickListener {
             if (!idle()) return@setOnClickListener
             if (cam.mode == Mode.VIDEO) { cycleFormat(); return@setOnClickListener }
+            if (cam.dual) { showToast("双景模式下只能拍 JPG"); return@setOnClickListener }
             if (cam.caps?.rawSupported != true) { showToast("这颗镜头不支持 RAW"); return@setOnClickListener }
             cam.rawRequested = !cam.rawRequested
             showToast(if (cam.rawRequested) "RAW：保存 DNG 原片，不套滤镜" else "JPG：带滤镜和水印")
@@ -486,8 +503,121 @@ class MainActivity : AppCompatActivity() {
         savePrefs()
     }
 
+    // ---------------- video HUD (Blackmagic Camera style) ----------------
+
+    private fun setupVidBar() {
+        vidBar = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(10f), dp(4f), dp(10f), dp(6f))
+            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP)
+            visibility = View.GONE
+        }
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        fun cell(key: String, label: String, click: () -> Unit): View {
+            val col = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_HORIZONTAL
+                setPadding(0, dp(4f), 0, dp(4f))
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                background = GradientDrawable().apply { cornerRadius = dp(6f).toFloat(); setColor(0) }
+            }
+            col.addView(TextView(this).apply { text = label; setTextColor(0x99FFFFFF.toInt()); textSize = 10f })
+            val v = TextView(this).apply { text = "--"; setTextColor(WHITE); textSize = 15f; typeface = Typeface.DEFAULT_BOLD; maxLines = 1 }
+            col.addView(v)
+            vidCells[key] = v
+            col.setOnClickListener { it.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK); click() }
+            return col
+        }
+        fun pro(p: ProParam) { closeSheet(); if (activeParam == p) activeParam = null else openSlider(p); refreshUi() }
+        row.addView(cell("fps", "帧率") { if (idle()) cycleFormat() })
+        row.addView(cell("sh", "快门") { pro(ProParam.SHUTTER) })
+        vidTc = TextView(this).apply {
+            text = "00:00:00:00"; setTextColor(WHITE); textSize = 19f; typeface = Typeface.MONOSPACE; gravity = Gravity.CENTER
+            paint.isFakeBoldText = true
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(4f); marginEnd = dp(4f) }
+        }
+        row.addView(vidTc)
+        row.addView(cell("iso", "ISO") { pro(ProParam.ISO) })
+        row.addView(cell("wb", "白平衡") { pro(ProParam.WB) })
+        vidBar.addView(row)
+        vidSub = TextView(this).apply {
+            setTextColor(0x99FFFFFF.toInt()); textSize = 11f; gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(2f) }
+        }
+        vidBar.addView(vidSub)
+        b.root.addView(vidBar, b.root.indexOfChild(b.topBar) + 1)
+        vidBar.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateTopInset() }
+    }
+
+    private fun updateTopInset() {
+        val tb = b.topBar.bottom
+        if (::vidBar.isInitialized && vidBar.translationY != tb.toFloat()) vidBar.translationY = tb.toFloat()
+        val show = ::vidBar.isInitialized && vidBar.visibility == View.VISIBLE && vidBar.height > 0
+        val inset = if (show) tb + vidBar.height + dp(2f) else tb + dp(6f)
+        if (renderer.topInset != inset) renderer.topInset = inset
+    }
+
+    private var codecKey = ""
+    private var codecChoice: Encoders.Choice? = null
+    private var freeBytes = 0L
+    private var freeAt = 0L
+
+    private fun updateVidBar() {
+        if (!::vidBar.isInitialized || vidBar.visibility != View.VISIBLE) return
+        val fmt = cam.boundFormat ?: cam.videoFormat
+        val fps = fmt?.fps ?: 30
+        val m = cam.manual
+        vidCells["fps"]?.text = fps.toString()
+        val ns = m.exposureNs ?: cam.liveExposureNs
+        vidCells["sh"]?.apply { text = if (ns > 0) "1/" + Math.round(1e9 / ns) else "自动"; setTextColor(if (m.exposureNs != null) ACCENT else WHITE) }
+        val iso = m.iso ?: cam.liveIso
+        vidCells["iso"]?.apply { text = if (iso > 0) iso.toString() else "自动"; setTextColor(if (m.iso != null) ACCENT else WHITE) }
+        val wbAuto = m.awbMode == android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_AUTO
+        vidCells["wb"]?.apply {
+            text = if (wbAuto) "自动" else (cam.caps?.let { c -> ManualOptions.wb(c).firstOrNull { it.value == m.awbMode }?.label } ?: "手动")
+            setTextColor(if (wbAuto) WHITE else ACCENT)
+        }
+        val rec = recorder != null
+        if (rec) {
+            val ms = SystemClock.elapsedRealtime() - recStart
+            val sec = ms / 1000
+            val fr = (ms % 1000) * fps / 1000
+            vidTc.text = String.format(java.util.Locale.US, "%02d:%02d:%02d:%02d", sec / 3600, sec / 60 % 60, sec % 60, fr)
+        } else vidTc.text = "00:00:00:00"
+        vidTc.setTextColor(if (rec) 0xFFFF3B30.toInt() else WHITE)
+        val key = "${fmt?.w}x${fmt?.h}@$fps"
+        if (key != codecKey) { codecKey = key; codecChoice = try { Encoders.choose(fmt?.w ?: 1920, fmt?.h ?: 1080, fps) } catch (_: Throwable) { null } }
+        val now = SystemClock.elapsedRealtime()
+        if (now - freeAt > 5000) {
+            freeAt = now
+            freeBytes = try { android.os.StatFs(filesDir.absolutePath).availableBytes } catch (_: Throwable) { 0L }
+        }
+        val parts = ArrayList<String>()
+        parts += fmt?.label ?: "1080p 30"
+        codecChoice?.let { parts += it.label }
+        if (profileLog) parts += "Log"
+        if (lutId != null) parts += "LUT"
+        val br = codecChoice?.bitrate ?: 0
+        if (br > 0 && freeBytes > 0) {
+            val secs = freeBytes / (br / 8L + 24_000L)
+            parts += "剩余 " + (if (secs >= 3600) "${secs / 3600}h${secs / 60 % 60}m" else "${secs / 60}m")
+        }
+        vidSub.text = parts.joinToString(" · ")
+    }
+
     private fun refreshUi() {
         val photo = cam.mode == Mode.PHOTO
+        val hideHud = hudHidden && !photo
+        val showVid = !photo && !hideHud
+        if (::vidBar.isInitialized && (vidBar.visibility == View.VISIBLE) != showVid) {
+            vidBar.visibility = if (showVid) View.VISIBLE else View.GONE
+            vidBar.post { updateTopInset() }
+            updateTopInset()
+        }
+        b.proRow.visibility = if (hideHud) View.INVISIBLE else View.VISIBLE
+        if (vfPlaced) b.vfControls.visibility = if (hideHud) View.INVISIBLE else View.VISIBLE
+        b.recTime.visibility = if (showVid && renderer.timelapseIntervalNs <= 0) View.GONE else View.VISIBLE
+        updateVidBar()
         b.btnFormat.text = if (photo) (if (cam.rawRequested) "RAW" else "JPG") else ((cam.boundFormat ?: cam.videoFormat)?.label ?: "1080p 30")
         b.btnFormat.setTextColor(if (photo && cam.rawRequested) ACCENT else WHITE)
         b.btnRatio.text = if (photo) photoRatios[photoRatioIdx].label else videoRatios[videoRatioIdx].label
@@ -545,12 +675,21 @@ class MainActivity : AppCompatActivity() {
                 MotionEvent.ACTION_UP -> {
                     val dx = e.x - downX; val dy = e.y - downY
                     if (!scaled && !scale.isInProgress && kotlin.math.abs(dx) > dp(70f) && kotlin.math.abs(dx) > kotlin.math.abs(dy) * 1.5f) {
-                        // swipe left → video, swipe right → photo
-                        if (dx < 0 && cam.mode == Mode.PHOTO) setUiMode(UiMode.VIDEO)
-                        else if (dx > 0 && cam.mode == Mode.VIDEO) setUiMode(UiMode.PHOTO)
+                        // swipe left / right → next / previous filter
+                        stepFilter(if (dx < 0) 1 else -1)
+                    } else if (!scaled && !scale.isInProgress && kotlin.math.abs(dy) > dp(90f) && kotlin.math.abs(dy) > kotlin.math.abs(dx) * 1.5f && cam.mode == Mode.VIDEO) {
+                        // swipe up / down in video → hide / show the HUD for a clean frame
+                        hudHidden = dy < 0
+                        refreshUi()
+                        showToast(if (hudHidden) "已隐藏参数，下滑恢复" else "显示参数")
                     } else if (!scaled && !scale.isInProgress && e.eventTime - e.downTime < 300 && kotlin.math.abs(dx) < dp(12f) && kotlin.math.abs(dy) < dp(12f)) {
                         if (activeParam != null) { activeParam = null; refreshUi() }
                         val r = renderer.previewRect
+                        if (cam.dual && r.width() > 0) {
+                            val f = renderer.pipFrac(r.width(), r.height())
+                            val pl = r.left + f[0] * r.width(); val pt = r.top + f[1] * r.height()
+                            if (e.x >= pl && e.x <= pl + f[2] * r.width() && e.y >= pt && e.y <= pt + f[3] * r.height()) { swapDual(); return@setOnTouchListener true }
+                        }
                         if (r.width() > 0 && r.contains(e.x, e.y)) {
                             val (fx, fy) = renderer.toFullContent((e.x - r.left) / r.width(), (e.y - r.top) / r.height())
                             cam.focusAt(fx, fy)
@@ -561,6 +700,36 @@ class MainActivity : AppCompatActivity() {
             }
             true
         }
+    }
+
+    private val FILTER_ORDER = listOf(0, 1, 2, 8, 3, 4, 5, 6, 9, 7)
+
+    private fun stepFilter(dir: Int) {
+        if (!idle()) return
+        val i = FILTER_ORDER.indexOf(params.style).coerceAtLeast(0)
+        val next = FILTER_ORDER[(i + dir + FILTER_ORDER.size) % FILTER_ORDER.size]
+        b.preview.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+        selectStyle(next)
+        if (sheet == Sheet.FILTER) buildFilter()
+        showBigLabel(Styles.all.first { it.id == next }.name)
+    }
+
+    private var bigLabel: TextView? = null
+    private fun showBigLabel(text: String) {
+        val tv = bigLabel ?: TextView(this).apply {
+            setTextColor(WHITE); textSize = 26f; typeface = Typeface.DEFAULT_BOLD
+            setShadowLayer(14f, 0f, 2f, 0xCC000000.toInt())
+            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.CENTER_HORIZONTAL)
+            b.root.addView(this, b.root.indexOfChild(b.hudCol))
+            bigLabel = this
+        }
+        tv.text = text
+        val r = renderer.previewRect
+        tv.y = (if (r.height() > 0) r.centerY() else b.root.height / 2f) - dp(20f)
+        tv.visibility = View.VISIBLE
+        tv.alpha = 1f
+        tv.animate().cancel()
+        tv.animate().alpha(0f).setStartDelay(700).setDuration(300).withEndAction { tv.visibility = View.GONE }.start()
     }
 
     private fun showFocusRing(x: Float, y: Float) {
@@ -676,6 +845,7 @@ class MainActivity : AppCompatActivity() {
             Sheet.QUICK -> buildQuick()
             Sheet.MODE -> buildModes()
             Sheet.FILTER -> { if (cat >= 0) filterCat = cat; buildFilter() }
+            Sheet.WATERMARK -> buildWatermark()
             Sheet.NONE -> {}
         }
         v.alpha = 0f
@@ -741,8 +911,9 @@ class MainActivity : AppCompatActivity() {
         val photo = cam.mode == Mode.PHOTO
         val items = ArrayList<GItem>()
         if (photo) items += GItem(if (border == Border.NONE) "水印" else border.label, R.drawable.ic_border, null, border != Border.NONE) {
-            border = Border.values()[(border.ordinal + 1) % Border.values().size]; savePrefs(); buildQuick()
+            sheet = Sheet.NONE; openSheet(Sheet.WATERMARK)
         }
+        items += GItem("双景", R.drawable.ic_dual, null, cam.dual) { toggleDual() }
         items += GItem("倒计时", R.drawable.ic_timer, if (timers[timerIdx] == 0) null else "${timers[timerIdx]}s", timers[timerIdx] > 0) {
             timerIdx = (timerIdx + 1) % timers.size; buildQuick()
         }
@@ -754,6 +925,121 @@ class MainActivity : AppCompatActivity() {
         items += GItem("日期", R.drawable.ic_date, null, params.dateStamp) { params.dateStamp = !params.dateStamp; savePrefs(); refreshUi() }
         if (!photo) items += GItem("防抖", R.drawable.ic_stab, null, cam.stabRequested) { toggleStab(); main.postDelayed({ if (sheet == Sheet.QUICK) buildQuick() }, 450) }
         buildGrid(null, items)
+    }
+
+    private fun wmSampleBitmap(): Bitmap {
+        wmSample?.let { return it }
+        // generated stand-in until the first photo is taken: sky, sun, hills
+        val w = 300; val h = 400
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val c = android.graphics.Canvas(bmp)
+        val p = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+        p.shader = android.graphics.LinearGradient(0f, 0f, 0f, h.toFloat(), 0xFF7FB2E5.toInt(), 0xFFF3C892.toInt(), android.graphics.Shader.TileMode.CLAMP)
+        c.drawRect(0f, 0f, w.toFloat(), h.toFloat(), p)
+        p.shader = null; p.color = 0xFFFFF1C9.toInt(); c.drawCircle(w * 0.7f, h * 0.38f, w * 0.09f, p)
+        p.color = 0xFF5E7A55.toInt(); c.drawOval(-w * 0.3f, h * 0.62f, w * 0.9f, h * 1.3f, p)
+        p.color = 0xFF3F5A3E.toInt(); c.drawOval(w * 0.3f, h * 0.7f, w * 1.4f, h * 1.4f, p)
+        wmSample = bmp
+        return bmp
+    }
+
+    private fun buildWatermark() {
+        b.sheetTitle.text = "水印"
+        b.sheetTitle.visibility = View.VISIBLE
+        b.sheetGrid.removeAllViews()
+        val on = border != Border.NONE
+        // 关闭 / 开启 segmented switch
+        val seg = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            background = GradientDrawable().apply { cornerRadius = dp(24f).toFloat(); setColor(0xFF161618.toInt()) }
+            setPadding(dp(4f), dp(4f), dp(4f), dp(4f))
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48f)).apply { marginStart = dp(20f); marginEnd = dp(20f) }
+        }
+        for ((label, want) in listOf("关闭" to false, "开启" to true)) {
+            seg.addView(TextView(this).apply {
+                text = label; gravity = Gravity.CENTER; textSize = 15f
+                setTextColor(if (want == on) 0xFF111111.toInt() else WHITE)
+                if (want == on) background = GradientDrawable().apply { cornerRadius = dp(20f).toFloat(); setColor(ACCENT) }
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
+                setOnClickListener {
+                    it.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                    border = if (want) lastBorder else Border.NONE
+                    savePrefs(); buildWatermark()
+                }
+            })
+        }
+        b.sheetGrid.addView(seg)
+        val scroll = android.widget.HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(18f) }
+        }
+        val strip = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(dp(14f), 0, dp(14f), 0) }
+        scroll.addView(strip)
+        val sample = wmSampleBitmap()
+        val info = shotInfo()
+        val cardH = dp(150f)
+        var selectedView: View? = null
+        for (kind in Border.values()) {
+            if (kind == Border.NONE) continue
+            val sel = kind == border
+            val img = ImageView(this).apply {
+                scaleType = ImageView.ScaleType.FIT_CENTER
+                layoutParams = LinearLayout.LayoutParams(dp(112f), cardH)
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(12f).toFloat(); setColor(0xFF1A1A1C.toInt())
+                    if (sel) setStroke(dp(2.5f), WHITE)
+                }
+                setPadding(dp(6f), dp(6f), dp(6f), dp(6f))
+            }
+            val cached = wmCache[kind]
+            if (cached != null) img.setImageBitmap(cached) else io.execute {
+                val out = try { Borders.apply(sample.copy(Bitmap.Config.ARGB_8888, true), kind, info) } catch (_: Throwable) { null }
+                if (out != null) main.post { wmCache[kind] = out; img.setImageBitmap(out) }
+            }
+            val lab = TextView(this).apply {
+                text = kind.label; textSize = 13f; gravity = Gravity.CENTER
+                setTextColor(if (sel) ACCENT else WHITE)
+                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8f) }
+            }
+            val col = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(dp(112f), LinearLayout.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(6f); marginEnd = dp(6f) }
+                addView(img); addView(lab)
+                setOnClickListener {
+                    it.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                    border = kind; lastBorder = kind; savePrefs(); buildWatermark()
+                }
+            }
+            if (sel) selectedView = col
+            strip.addView(col)
+        }
+        b.sheetGrid.addView(scroll)
+        selectedView?.let { v -> scroll.post { scroll.scrollTo(maxOf(0, v.left - dp(40f)), 0) } }
+        b.sheetGrid.addView(TextView(this).apply {
+            text = "水印只加在 JPG 照片上，RAW 和视频不加"
+            setTextColor(0x80FFFFFF.toInt()); textSize = 12f; gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(14f) }
+        })
+    }
+
+    private fun toggleDual() {
+        if (!idle()) return
+        if (!cam.dual && !cam.dualSupported()) { showToast("这台手机不支持前后摄同时开启"); return }
+        cam.dual = !cam.dual
+        if (cam.dual && cam.rawRequested) cam.rawRequested = false
+        cam.manual.reset(); activeParam = null; zoomKey = ""
+        showToast(if (cam.dual) "双景：点小窗交换前后摄" else "双景 关")
+        prefs.edit().putBoolean("dual", cam.dual).apply()
+        maybeBind()
+        if (sheet == Sheet.QUICK) buildQuick()
+    }
+
+    private fun swapDual() {
+        if (!idle()) return
+        cam.manual.reset(); activeParam = null; zoomKey = ""
+        cam.lensFacing = if (cam.lensFacing == CameraSelector.LENS_FACING_BACK) CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
+        b.btnFlip.animate().rotationBy(180f).setDuration(250).start()
+        maybeBind()
     }
 
     private fun buildModes() {
@@ -1208,8 +1494,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun takePhoto() {
-        val ic = cam.imageCapture ?: return
-        if (cam.rawActive) { takeRaw(ic); return }
+        val ic = cam.imageCapture
+        if (ic == null && !cam.dual) return
+        if (cam.rawActive && ic != null) { takeRaw(ic); return }
         busy = true
         shutterFeedback()
         val info = shotInfo()
@@ -1229,6 +1516,7 @@ class MainActivity : AppCompatActivity() {
 
     /** Takes a still and returns it upright and cropped to the photo ratio (unprocessed). Callback on [io]. */
     private fun captureUpright(onResult: (Bitmap?) -> Unit) {
+        if (cam.dual) { renderer.grabComposite { bmp -> io.execute { onResult(bmp) } }; return }
         val ic = cam.imageCapture ?: run { onResult(null); return }
         val front = cam.lensFacing == CameraSelector.LENS_FACING_FRONT && mirrorFront
         val ratio = photoRatios[photoRatioIdx].r
@@ -1601,7 +1889,8 @@ class MainActivity : AppCompatActivity() {
             placeVf()
             buildZoom()
             refreshZoom()
-            main.postDelayed(this, 200)
+            updateVidBar()
+            main.postDelayed(this, if (recorder != null) 100 else 200)
         }
     }
 
@@ -2027,6 +2316,7 @@ class MainActivity : AppCompatActivity() {
         burnIn = prefs.getBoolean("burn", true)
         stabPref = prefs.getBoolean("stab", true)
         border = Border.values().getOrElse(prefs.getInt("border", 0)) { Border.NONE }
+        lastBorder = Border.values().getOrElse(prefs.getInt("lastBorder", 1)) { Border.WHITE }.let { if (it == Border.NONE) Border.WHITE else it }
         tlIdx = prefs.getInt("tl2", 2).coerceIn(1, tlIntervals.size - 1)
         mirrorFront = prefs.getBoolean("mirror", true)
         volShutter = prefs.getBoolean("volShutter", true)
@@ -2061,6 +2351,7 @@ class MainActivity : AppCompatActivity() {
             .putBoolean("burn", burnIn)
             .putBoolean("stab", cam.stabRequested)
             .putInt("border", border.ordinal)
+            .putInt("lastBorder", lastBorder.ordinal)
             .putInt("tl2", tlIdx)
             .putInt("uimode", uiMode.ordinal)
             .putBoolean("mirror", mirrorFront)

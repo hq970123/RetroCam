@@ -48,10 +48,17 @@ tap_text "视频"; shot settings_video
 tap_text "辅助"; shot settings_assist
 tap_text "关于"; shot settings_about; back
 shot after_settings_back
-adb shell input swipe 900 1000 150 1000 250; shot swipe_left 3
+quick(){ c=$(center "resource-id=\"$PKG:id/btnQuick\""); [ -n "$c" ] && adb shell input tap $c; sleep 1; }
+quick; tap_text "水印"; shot watermark_sheet
+tap_text "打卡水印"; shot watermark_punch; back
+adb shell input swipe 900 1000 150 1000 250; shot swipe_filter 1
+t 321 $Y_BOT; sleep 1; tap_text "录像"; shot video_mode 4
 t 554 $Y_BOT; shot video_recording 4
 t 554 $Y_BOT; sleep 2
-adb shell input swipe 150 1000 900 1000 250; shot swipe_right 3
+adb shell input swipe 540 1300 540 500 300; shot video_hud_hidden 2
+adb shell input swipe 540 500 540 1300 300; sleep 1
+t 321 $Y_BOT; sleep 1; tap_text "拍照"; sleep 3
+quick; tap_text "双景"; shot dual 5; back
 t 554 $Y_BOT; shot after_shutter 4
 t 127 $Y_BOT; shot gallery_or_editor 3; back
 t 980 $Y_BOT; shot front_cam 4
