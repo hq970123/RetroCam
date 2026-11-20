@@ -62,6 +62,12 @@ quick; tap_text "双景"; shot dual 5; back
 t 554 $Y_BOT; shot after_shutter 4
 t 127 $Y_BOT; shot gallery_or_editor 3; back
 t 980 $Y_BOT; shot front_cam 4
+# landscape: tilt the phone (accelerometer) so the app rotates its icons
+adb emu sensor set acceleration 9.81:0:0; sleep 2; shot land_photo 3
+t 321 $Y_BOT; sleep 1; tap_text "录像"; shot land_video 4
+t 554 $Y_BOT; shot land_recording 4; t 554 $Y_BOT; sleep 2
+adb emu sensor set acceleration -9.81:0:0; sleep 2; shot land_video_other 3
+adb emu sensor set acceleration 0:9.81:0; sleep 1
 adb logcat -d > $OUT/logcat.txt
 adb logcat -d -b crash > $OUT/crash.txt
 true
