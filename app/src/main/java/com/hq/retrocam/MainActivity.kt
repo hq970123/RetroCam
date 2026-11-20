@@ -288,6 +288,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupInsets() {
         b.topBar.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ -> renderer.topInset = v.bottom + dp(6f) }
+        // reserve the zoom row (44dp) plus gaps above the pro row so the viewfinder never sits under controls
+        b.bottomPanel.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
+            val h = (v.parent as View).height
+            if (h > 0) renderer.bottomInset = h - v.top + dp(44f) + dp(14f)
+        }
         ViewCompat.setOnApplyWindowInsetsListener(b.root) { _, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
             b.topBar.setPadding(b.topBar.paddingLeft, bars.top + dp(12f), b.topBar.paddingRight, b.topBar.paddingBottom)
@@ -1159,7 +1164,7 @@ class MainActivity : AppCompatActivity() {
         // Sit just below the viewfinder so the zoom row never covers the burned-in date stamp;
         // only slide up over the image when there is no room (e.g. slider open, tall ratios).
         val maxTop = b.bottomPanel.top.toFloat() - dp(4f) - b.vfControls.height
-        val below = r.bottom - dp(10f)
+        val below = r.bottom + dp(6f)
         b.vfControls.y = minOf(below, maxTop)
         b.hudCol.y = r.top + dp(14f)
         if (!vfPlaced && b.vfControls.height > 0) { vfPlaced = true; b.vfControls.visibility = View.VISIBLE }

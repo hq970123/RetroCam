@@ -317,6 +317,8 @@ class CameraRenderer(private val params: LookParams) {
     @Volatile var topInset = -1
     /** Horizontal margin on each side of the viewfinder, in pixels. */
     @Volatile var sideInset = 0
+    /** Pixels reserved below the viewfinder (zoom row + controls); 0 = none. */
+    @Volatile var bottomInset = 0
 
     fun start(onReady: (SurfaceTexture) -> Unit) {
         handler.post {
@@ -410,20 +412,20 @@ class CameraRenderer(private val params: LookParams) {
                 GLES30.glViewport(0, 0, displayW, displayH)
                 GLES30.glClearColor(0f, 0f, 0f, 1f)
                 GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
-                // full-frame placement is fixed by the uncropped frame so switching ratio doesn't jump
+                // Fit the visible (cropped) frame into the box between the top bar and the
+                // controls below, centred, so tall ratios (16:9) never run under the zoom/pro rows
+                // and square ones don't leave a hole under the zoom row.
                 val full = contentW.toFloat() / contentH
-                val fw: Int; val fh: Int
+                val vis = full * crop[2] / maxOf(1e-3f, crop[3])
                 val side = sideInset.coerceIn(0, displayW / 4)
                 val availW = displayW - 2 * side
-                if (availW.toFloat() / displayH > full) { fh = displayH; fw = (displayH * full).toInt() } else { fw = availW; fh = (availW / full).toInt() }
                 val topOffset = if (topInset >= 0) topInset else (displayH * 0.11f).toInt()
-                var fTop = if (displayH - fh >= topOffset * 2) topOffset else (displayH - fh) / 2
-                if (fTop + fh > displayH) fTop = (displayH - fh) / 2
-                val fLeft = (displayW - fw) / 2
-                val vw = (fw * crop[2]).toInt()
-                val vh = (fh * crop[3]).toInt()
-                val vx = fLeft + (fw - vw) / 2
-                val vyTop = fTop + (fh - vh) / 2
+                val bottomRes = if (bottomInset > 0) bottomInset else 0
+                val boxH = (displayH - topOffset - bottomRes).coerceAtLeast(displayH / 3)
+                val vw: Int; val vh: Int
+                if (availW.toFloat() / boxH > vis) { vh = boxH; vw = (boxH * vis).toInt() } else { vw = availW; vh = (availW / vis).toInt() }
+                val vx = (displayW - vw) / 2
+                val vyTop = topOffset + (boxH - vh) / 2
                 val vy = displayH - vyTop - vh
                 previewRect = android.graphics.RectF(vx.toFloat(), vyTop.toFloat(), (vx + vw).toFloat(), (vyTop + vh).toFloat())
                 GLES30.glViewport(vx, vy, vw, vh)
