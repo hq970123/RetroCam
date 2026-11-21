@@ -303,6 +303,7 @@ class MainActivity : AppCompatActivity() {
         b.bottomPanel.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
             val h = (v.parent as View).height
             if (h > 0) renderer.bottomInset = h - v.top + dp(44f) + dp(14f)
+            updateTopInset()
         }
         ViewCompat.setOnApplyWindowInsetsListener(b.root) { _, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
@@ -336,10 +337,51 @@ class MainActivity : AppCompatActivity() {
 
     private fun surfaceRotation(o: Int) = when (o) { 90 -> Surface.ROTATION_270; 180 -> Surface.ROTATION_180; 270 -> Surface.ROTATION_90; else -> Surface.ROTATION_0 }
 
+    /** Rotation applied to every on-screen control so it reads upright for the way the phone is held. */
+    private var uiRot = 0f
+    /** 90 = held landscape with the right side up (HUD on the portrait right edge), -90 = left side up, 0 = portrait. */
+    private var landRot = 0f
+
+    private fun rotatables(): List<View> {
+        val l = arrayListOf<View>(b.thumb, b.btnMode, b.btnFlash, b.btnSettings, b.countdown, b.btnQuick, b.btnAuto,
+            b.btnFilter, b.btnFlip, b.btnFormat.parent as View, b.btnRatio.parent as View, b.hudCol, b.sliderAuto)
+        zoomViews.forEach { l += it.second }
+        proCells.forEach { l += it.box }
+        return l
+    }
+
     private fun rotateIcons(o: Int) {
         val r = -o.toFloat()
-        val target = if (r < -180) r + 360 else r
-        listOf<View>(b.thumb, b.btnMode, b.btnFlash, b.btnSettings, b.countdown, b.btnQuick, b.btnAuto, b.filterIcon).forEach { it.animate().rotation(target).setDuration(200).start() }
+        uiRot = if (r < -180) r + 360 else r
+        landRot = when (o) { 90 -> -90f; 270 -> 90f; else -> 0f }
+        rotatables().forEach { it.animate().rotation(uiRot).setDuration(200).start() }
+        updateTopInset()
+    }
+
+    /** Portrait: HUD strip under the top bar. Landscape: the same strip turned 90 degrees and laid along
+     *  the long edge that is "up", so it reads like Blackmagic Camera's top bar. */
+    private fun layoutVidBar() {
+        if (!::vidBar.isInitialized) return
+        val lp = vidBar.layoutParams as FrameLayout.LayoutParams
+        if (landRot == 0f) {
+            if (lp.width != FrameLayout.LayoutParams.MATCH_PARENT) { lp.width = FrameLayout.LayoutParams.MATCH_PARENT; vidBar.layoutParams = lp }
+            vidBar.rotation = 0f; vidBar.translationX = 0f
+            vidBar.translationY = b.topBar.bottom.toFloat()
+            vidBar.background = null
+            return
+        }
+        val top = b.topBar.bottom + dp(4f)
+        val bottom = b.bottomPanel.top - dp(66f)
+        val len = maxOf(bottom - top, dp(260f))
+        if (lp.width != len) { lp.width = len; vidBar.layoutParams = lp; return }
+        val h = vidBar.height
+        if (h <= 0) return
+        if (vidBar.background == null) vidBar.background = GradientDrawable().apply { cornerRadius = dp(10f).toFloat(); setColor(0x8C000000.toInt()) }
+        vidBar.pivotX = len / 2f; vidBar.pivotY = h / 2f
+        vidBar.rotation = landRot
+        val cx = if (landRot > 0) b.root.width - dp(4f) - h / 2f else dp(4f) + h / 2f
+        vidBar.translationX = cx - len / 2f
+        vidBar.translationY = top + len / 2f - h / 2f
     }
 
     override fun onResume() {
@@ -551,10 +593,17 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateTopInset() {
         val tb = b.topBar.bottom
-        if (::vidBar.isInitialized && vidBar.translationY != tb.toFloat()) vidBar.translationY = tb.toFloat()
+        layoutVidBar()
         val show = ::vidBar.isInitialized && vidBar.visibility == View.VISIBLE && vidBar.height > 0
-        val inset = if (show) tb + vidBar.height + dp(2f) else tb + dp(6f)
+        val land = landRot != 0f
+        val inset = when {
+            show && !land -> tb + vidBar.height + dp(2f)
+            land -> tb + dp(24f)   // rotated pills reach a little below the bar
+            else -> tb + dp(6f)
+        }
         if (renderer.topInset != inset) renderer.topInset = inset
+        val side = if (show && land) vidBar.height + dp(8f) else dp(12f)
+        if (renderer.sideInset != side) renderer.sideInset = side
     }
 
     private var codecKey = ""
@@ -1417,6 +1466,7 @@ class MainActivity : AppCompatActivity() {
                 gravity = Gravity.CENTER; textSize = 12f; setTextColor(WHITE)
                 setBackgroundResource(R.drawable.vf_circ)
                 layoutParams = LinearLayout.LayoutParams(dp(40f), dp(40f)).apply { marginStart = dp(5f); marginEnd = dp(5f) }
+                rotation = uiRot
                 setOnClickListener {
                     it.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                     cam.setZoom(if (z == stops.first() && z < 1f) range.first else z)
@@ -1444,9 +1494,11 @@ class MainActivity : AppCompatActivity() {
         val r = renderer.previewRect
         if (r.width() <= 0f) return
         val lp = b.vfControls.layoutParams
-        val w = r.width().toInt()
+        // narrow frames (16:9 video, 2.39) would squeeze A / zoom / dots together: use the full width then
+        val rootW = b.root.width
+        val w = if (r.width() < dp(384f) && rootW > 0) rootW else r.width().toInt()
         if (lp.width != w) { lp.width = w; b.vfControls.layoutParams = lp }
-        b.vfControls.x = r.left
+        b.vfControls.x = if (w == rootW) 0f else r.left
         // Sit just below the viewfinder so the zoom row never covers the burned-in date stamp;
         // only slide up over the image when there is no room (e.g. slider open, tall ratios).
         val maxTop = b.bottomPanel.top.toFloat() - dp(4f) - b.vfControls.height
