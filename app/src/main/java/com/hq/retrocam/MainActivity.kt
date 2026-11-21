@@ -298,6 +298,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupInsets() {
+        b.topBar.clipChildren = false; b.topBar.clipToPadding = false; b.root.clipChildren = false
         b.topBar.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateTopInset() }
         // reserve the zoom row (44dp) plus gaps above the pro row so the viewfinder never sits under controls
         b.bottomPanel.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
@@ -371,7 +372,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val top = b.topBar.bottom + dp(4f)
-        val bottom = b.bottomPanel.top - dp(66f)
+        val bottom = b.bottomPanel.top - dp(118f)   // stay clear of the A / zoom / dots row
         val len = maxOf(bottom - top, dp(260f))
         if (lp.width != len) { lp.width = len; vidBar.layoutParams = lp; return }
         val h = vidBar.height
